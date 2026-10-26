@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#202124">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="记录台">
+  <title>记录台 · Notion PWA 原型</title>
+  <link rel="manifest" href="./manifest.json">
+  <link rel="icon" href="./assets/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./assets/icon-180.png">
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand"><span class="brand-mark">N</span><div><strong>记录台</strong><small>Notion PWA 模拟原型</small></div></div>
+    <nav class="database-tabs" aria-label="数据库切换">
+      <button class="tab active" data-db="purchases">采购清单 <span id="purchase-count"></span></button>
+      <button class="tab" data-db="sales">售出记录 <span id="sale-count"></span></button>
+    </nav>
+  </header>
+
+  <div class="demo-notice" role="status">演示模式：所有内容均为虚构数据，修改仅保存在当前页面内存中，刷新后会恢复。</div>
+
+  <main>
+    <section class="toolbar" aria-label="记录操作">
+      <label class="search"><span>⌕</span><input id="search" type="search" placeholder="搜索当前数据库…" autocomplete="off"></label>
+      <select id="filter" aria-label="筛选条件"></select>
+      <button id="add-record" class="primary">＋ 新增</button>
+      <button id="paste-grid" class="desktop-action">粘贴表格</button>
+      <button id="reset-data" class="quiet" title="恢复初始模拟数据">重置</button>
+    </section>
+
+    <section class="content-shell">
+      <div class="view-heading">
+        <div><h1 id="view-title">采购清单</h1><p id="view-subtitle"></p></div>
+        <span class="desktop-hint">点击单元格选中；双击记录或使用“编辑”打开完整字段</span>
+      </div>
+      <div id="desktop-table" class="table-wrap" tabindex="0" aria-label="响应式数据表格"></div>
+      <div id="mobile-cards" class="cards" aria-live="polite"></div>
+      <div id="empty-state" class="empty" hidden>没有符合条件的记录。</div>
+    </section>
+  </main>
+
+  <dialog id="record-dialog" class="record-dialog">
+    <form id="record-form" method="dialog">
+      <header class="dialog-header">
+        <button type="button" id="back-record" class="icon-button" hidden aria-label="返回上一条记录">←</button>
+        <div><small id="dialog-db"></small><h2 id="dialog-title"></h2></div>
+        <button type="button" class="icon-button close-dialog" aria-label="关闭">×</button>
+      </header>
+      <div id="form-fields" class="form-fields"></div>
+      <footer class="dialog-footer">
+        <button type="button" id="copy-record">复制整条记录</button>
+        <button type="button" id="delete-record" class="danger">删除</button>
+        <span class="footer-spacer"></span>
+        <button type="button" class="close-dialog">取消</button>
+        <button type="submit" class="primary">保存修改</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="paste-dialog" class="paste-dialog">
+    <form method="dialog" id="paste-form">
+      <header class="dialog-header"><div><small>Windows / Excel</small><h2>粘贴多行多列</h2></div><button type="button" class="icon-button close-paste">×</button></header>
+      <p id="paste-help"></p>
+      <textarea id="paste-input" rows="9" placeholder="从 Excel 复制单元格后在此粘贴…"></textarea>
+      <div id="paste-preview" class="paste-preview"></div>
+      <footer class="dialog-footer"><button type="button" class="close-paste">取消</button><button type="submit" class="primary">应用数据</button></footer>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="./app.js" defer></script>
+</body>
+</html>
