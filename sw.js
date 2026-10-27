@@ -1,4 +1,4 @@
-const CACHE_NAME = "notion-pwa-v0.1-static-1";
+const CACHE_NAME = "notion-pwa-v0.2-static-1";
 const APP_SHELL = [
   "./",
   "./index.html",

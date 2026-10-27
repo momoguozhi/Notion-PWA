@@ -1,227 +1,192 @@
 "use strict";
 
 const purchaseSchema = [
-  { key: "name", label: "商品名称", type: "text", group: "常用字段", required: true },
-  { key: "category", label: "商品类别", type: "select", options: ["文具", "家居", "数码", "服饰", "食品"], group: "常用字段" },
-  { key: "code", label: "商品编码", type: "text", group: "常用字段" },
-  { key: "quantity", label: "数量", type: "number", min: 0, group: "常用字段" },
-  { key: "unitPrice", label: "采购单价", type: "number", step: "0.01", min: 0, group: "价格与日期" },
-  { key: "currency", label: "币种", type: "select", options: ["JPY", "CNY", "USD", "EUR"], group: "价格与日期" },
-  { key: "exchangeRate", label: "汇率（兑日元）", type: "number", step: "0.0001", min: 0, group: "价格与日期" },
-  { key: "discount", label: "折扣（%）", type: "number", step: "1", min: 0, max: 100, group: "价格与日期" },
-  { key: "purchaseDate", label: "采购日期", type: "date", group: "价格与日期" },
-  { key: "store", label: "店铺", type: "text", group: "来源资料" },
-  { key: "url", label: "商品网址", type: "url", group: "来源资料" },
-  { key: "image", label: "图片地址", type: "url", group: "来源资料" },
-  { key: "status", label: "状态", type: "select", options: ["待采购", "已采购", "已入库", "部分售出", "已售罄"], group: "常用字段" },
-  { key: "notes", label: "备注", type: "textarea", group: "来源资料", full: true },
-  { key: "totalCost", label: "采购总额（日元）", type: "formula", group: "计算与关联" },
-  { key: "saleIds", label: "关联售出记录", type: "relation", target: "sales", group: "计算与关联", full: true }
+  { key:"name", label:"商品名称", type:"text", group:"常用字段" },
+  { key:"majorCategoryId", label:"大分类", type:"category-major", group:"分类", required:true },
+  { key:"subCategoryId", label:"小分类", type:"category-sub", group:"分类", required:true },
+  { key:"photos", label:"照片", type:"photos", group:"照片", full:true },
+  { key:"code", label:"商品编码", type:"text", group:"常用字段" },
+  { key:"quantity", label:"数量", type:"number", min:0, group:"常用字段" },
+  { key:"unitPrice", label:"采购单价", type:"number", step:"0.01", min:0, group:"价格与日期" },
+  { key:"currency", label:"币种", type:"select", options:["JPY","CNY","USD","EUR"], group:"价格与日期" },
+  { key:"exchangeRate", label:"汇率（兑日元）", type:"number", step:"0.0001", min:0, group:"价格与日期" },
+  { key:"discount", label:"折扣（%）", type:"number", step:"1", min:0, max:100, group:"价格与日期" },
+  { key:"purchaseDate", label:"采购日期", type:"date", group:"价格与日期" },
+  { key:"store", label:"店铺", type:"text", group:"来源资料" },
+  { key:"url", label:"商品网址", type:"url", group:"来源资料" },
+  { key:"status", label:"状态", type:"select", options:["待采购","已采购","已入库","部分售出","已售罄"], group:"常用字段" },
+  { key:"notes", label:"备注", type:"textarea", group:"来源资料", full:true },
+  { key:"totalCost", label:"采购总额（日元）", type:"formula", group:"计算与关联" },
+  { key:"saleIds", label:"关联售出记录", type:"relation", target:"sales", group:"计算与关联", full:true }
 ];
 
 const saleSchema = [
-  { key: "customer", label: "顾客", type: "text", group: "售出信息", required: true },
-  { key: "purchaseIds", label: "关联商品", type: "relation", target: "purchases", group: "售出信息", full: true },
-  { key: "quantity", label: "数量", type: "number", min: 0, group: "售出信息" },
-  { key: "salePrice", label: "售价（日元）", type: "number", step: "1", min: 0, group: "价格与日期" },
-  { key: "shipping", label: "运费（日元）", type: "number", step: "1", min: 0, group: "价格与日期" },
-  { key: "saleDate", label: "出售日期", type: "date", group: "价格与日期" },
-  { key: "netIncome", label: "净收入（日元）", type: "formula", group: "价格与日期" }
+  { key:"customer", label:"顾客", type:"text", group:"售出信息", required:true },
+  { key:"purchaseIds", label:"关联商品", type:"relation", target:"purchases", group:"售出信息", full:true },
+  { key:"quantity", label:"数量", type:"number", min:0, group:"售出信息" },
+  { key:"salePrice", label:"售价（日元）", type:"number", step:"1", min:0, group:"价格与日期" },
+  { key:"shipping", label:"运费（日元）", type:"number", step:"1", min:0, group:"价格与日期" },
+  { key:"saleDate", label:"出售日期", type:"date", group:"价格与日期" },
+  { key:"netIncome", label:"净收入（日元）", type:"formula", group:"价格与日期" }
 ];
 
-const initialData = {
-  purchases: [
-    { id:"p1", name:"黄铜自动铅笔", category:"文具", code:"ST-104", quantity:4, unitPrice:120, currency:"CNY", exchangeRate:20.6, discount:10, purchaseDate:"2026-09-18", store:"拾光文具", url:"https://example.com/pencil", image:"https://example.com/image/pencil.jpg", status:"部分售出", notes:"虚构样品：雾面黄铜笔身", saleIds:["s1","s3"] },
-    { id:"p2", name:"折叠桌面灯", category:"家居", code:"HM-208", quantity:2, unitPrice:4200, currency:"JPY", exchangeRate:1, discount:0, purchaseDate:"2026-09-24", store:"北町生活馆", url:"https://example.com/lamp", image:"https://example.com/image/lamp.jpg", status:"已入库", notes:"虚构样品：暖白光三档", saleIds:[] },
-    { id:"p3", name:"复古蓝牙音箱", category:"数码", code:"DG-077", quantity:3, unitPrice:38, currency:"USD", exchangeRate:148.2, discount:5, purchaseDate:"2026-10-02", store:"Cloud Audio", url:"https://example.com/speaker", image:"https://example.com/image/speaker.jpg", status:"部分售出", notes:"虚构样品：蓝灰配色", saleIds:["s2"] },
-    { id:"p4", name:"亚麻收纳袋", category:"家居", code:"HM-311", quantity:8, unitPrice:36, currency:"CNY", exchangeRate:20.6, discount:0, purchaseDate:"2026-10-11", store:"木棉杂货", url:"https://example.com/bag", image:"https://example.com/image/bag.jpg", status:"待采购", notes:"虚构样品：三种尺寸", saleIds:[] }
+function mockPhoto(id,label,color,date) {
+  const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="480" height="480"><rect width="480" height="480" fill="${color}"/><circle cx="390" cy="85" r="100" fill="rgba(255,255,255,.16)"/><text x="36" y="410" fill="white" font-size="42" font-family="sans-serif">${label}</text></svg>`;
+  return {id,name:`${label}.jpg`,url:`data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`,date,dateSource:"人工指定"};
+}
+
+const initialCategories={
+  major:[{id:"m1",name:"日常用品",sort:10},{id:"m2",name:"兴趣收藏",sort:20},{id:"m3",name:"数码设备",sort:30}],
+  sub:[{id:"c1",name:"文具",majorId:"m1",sort:10},{id:"c2",name:"家居",majorId:"m1",sort:20},{id:"c3",name:"复古小物",majorId:"m2",sort:10},{id:"c4",name:"音频",majorId:"m3",sort:10}]
+};
+
+const initialData={
+  purchases:[
+    {id:"p1",name:"黄铜自动铅笔",majorCategoryId:"m1",subCategoryId:"c1",photos:[mockPhoto("ph1","黄铜笔","#8c7044","2026-09-18")],primaryPhotoId:"",code:"ST-104",quantity:4,unitPrice:120,currency:"CNY",exchangeRate:20.6,discount:10,purchaseDate:"2026-09-18",store:"拾光文具",url:"https://example.com/pencil",status:"部分售出",notes:"虚构样品：雾面黄铜笔身",saleIds:["s1","s3"]},
+    {id:"p2",name:"折叠桌面灯",majorCategoryId:"m1",subCategoryId:"c2",photos:[mockPhoto("ph2","桌面灯","#ca9d58","2026-09-24"),mockPhoto("ph3","灯光细节","#6f747a","2026-09-22")],primaryPhotoId:"",code:"HM-208",quantity:2,unitPrice:4200,currency:"JPY",exchangeRate:1,discount:0,purchaseDate:"2026-09-24",store:"北町生活馆",url:"https://example.com/lamp",status:"已入库",notes:"虚构样品：暖白光三档",saleIds:[]},
+    {id:"p3",name:"复古蓝牙音箱",majorCategoryId:"m3",subCategoryId:"c4",photos:[mockPhoto("ph4","蓝牙音箱","#637b89","2026-10-02")],primaryPhotoId:"ph4",code:"DG-077",quantity:3,unitPrice:38,currency:"USD",exchangeRate:148.2,discount:5,purchaseDate:"2026-10-02",store:"Cloud Audio",url:"https://example.com/speaker",status:"部分售出",notes:"虚构样品：蓝灰配色",saleIds:["s2"]},
+    {id:"p4",name:"",majorCategoryId:"m2",subCategoryId:"c3",photos:[],primaryPhotoId:"",code:"HM-311",quantity:8,unitPrice:36,currency:"CNY",exchangeRate:20.6,discount:0,purchaseDate:"2026-10-11",store:"木棉杂货",url:"",status:"待采购",notes:"无名称、无照片记录的浏览示例",saleIds:[]}
   ],
-  sales: [
-    { id:"s1", customer:"佐藤葵（示例）", purchaseIds:["p1"], quantity:1, salePrice:4200, shipping:210, saleDate:"2026-10-08" },
-    { id:"s2", customer:"林晓（示例）", purchaseIds:["p3"], quantity:1, salePrice:9200, shipping:520, saleDate:"2026-10-14" },
-    { id:"s3", customer:"田中悠（示例）", purchaseIds:["p1","p3"], quantity:2, salePrice:7600, shipping:350, saleDate:"2026-10-19" }
+  sales:[
+    {id:"s1",customer:"佐藤葵（示例）",purchaseIds:["p1"],quantity:1,salePrice:4200,shipping:210,saleDate:"2026-10-08"},
+    {id:"s2",customer:"林晓（示例）",purchaseIds:["p3"],quantity:1,salePrice:9200,shipping:520,saleDate:"2026-10-14"},
+    {id:"s3",customer:"田中悠（示例）",purchaseIds:["p1","p3"],quantity:2,salePrice:7600,shipping:350,saleDate:"2026-10-19"}
   ]
 };
 
-const databaseMeta = {
-  purchases: { title:"采购清单", schema:purchaseSchema, relationKey:"saleIds", target:"sales", primary:"name", subtitle:"16 个字段 · 商品、来源、价格、公式与售出关联" },
-  sales: { title:"售出记录", schema:saleSchema, relationKey:"purchaseIds", target:"purchases", primary:"customer", subtitle:"7 个字段 · 顾客、商品、售价与净收入" }
+const databaseMeta={
+  purchases:{title:"采购清单",schema:purchaseSchema,relationKey:"saleIds",target:"sales",primary:"name",subtitle:"分类、照片、来源、价格与售出关联"},
+  sales:{title:"售出记录",schema:saleSchema,relationKey:"purchaseIds",target:"purchases",primary:"customer",subtitle:"顾客、商品、售价与净收入"}
 };
 
-let data = structuredClone(initialData);
-let state = { db:"purchases", query:"", filter:"all", selected:null, editing:null, history:[], creating:null };
-let idCounter = 100;
-const $ = selector => document.querySelector(selector);
-const $$ = selector => [...document.querySelectorAll(selector)];
+let data=structuredClone(initialData);
+let categories=structuredClone(initialCategories);
+let state={db:"purchases",query:"",filter:"all",selected:null,editing:null,history:[],creating:null,selectedMajorId:"m1",selectedSubId:"c1",photoDraft:[],primaryPhotoDraft:"",batchDraft:null};
+let idCounter=200;
+const $=selector=>document.querySelector(selector);
+const $$=selector=>[...document.querySelectorAll(selector)];
+const preferences=loadPreferences();
 
-function getSchema(db = state.db) { return databaseMeta[db].schema; }
-function getRecord(db, id) { return data[db].find(record => record.id === id); }
-function formula(db, record, key) {
-  if (db === "purchases" && key === "totalCost") return Math.round((+record.quantity || 0) * (+record.unitPrice || 0) * (+record.exchangeRate || 0) * (1 - (+record.discount || 0) / 100));
-  if (db === "sales" && key === "netIncome") return (+record.salePrice || 0) - (+record.shipping || 0);
-  return "";
-}
-function displayValue(db, record, field) {
-  if (!record) return "";
-  if (field.type === "formula") return formula(db, record, field.key).toLocaleString("zh-CN");
-  if (field.type === "relation") return (record[field.key] || []).map(id => getRecord(field.target, id)?.[databaseMeta[field.target].primary] || "已删除记录").join("、");
-  if (field.key === "unitPrice" || field.key === "salePrice" || field.key === "shipping") return (+record[field.key] || 0).toLocaleString("zh-CN");
-  return record[field.key] ?? "";
-}
-function escapeHtml(value) { return String(value ?? "").replace(/[&<>"]/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[char])); }
-function toast(message) { const el=$("#toast"); el.textContent=message; el.classList.add("show"); clearTimeout(toast.timer); toast.timer=setTimeout(()=>el.classList.remove("show"),1800); }
-async function copyText(text) {
-  try { await navigator.clipboard.writeText(String(text)); toast("已复制到剪贴板"); }
-  catch { const area=document.createElement("textarea"); area.value=String(text); document.body.append(area); area.select(); document.execCommand("copy"); area.remove(); toast("已复制到剪贴板"); }
-}
+function loadPreferences(){try{return {...{layout:"category",columns:4,modules:["category","recent","unlinked"]},...JSON.parse(localStorage.getItem("notion-pwa-v02-preferences")||"{}")};}catch{return {layout:"category",columns:4,modules:["category","recent","unlinked"]};}}
+function savePreferences(){localStorage.setItem("notion-pwa-v02-preferences",JSON.stringify(preferences));}
 
-function filteredRecords() {
-  const meta=databaseMeta[state.db];
-  return data[state.db].filter(record => {
-    const haystack=getSchema().map(field=>displayValue(state.db,record,field)).join(" ").toLowerCase();
-    const searchOk=haystack.includes(state.query.toLowerCase());
-    let filterOk=true;
-    if (state.filter==="linked") filterOk=(record[meta.relationKey]||[]).length>0;
-    if (state.filter==="unlinked") filterOk=(record[meta.relationKey]||[]).length===0;
-    if (state.filter.startsWith("value:")) { const [,key,value]=state.filter.split(":"); filterOk=String(record[key])===value; }
-    return searchOk && filterOk;
-  });
-}
+const dataAdapter={
+  mode:"mock",db:null,
+  async open(){if(!("indexedDB" in window))return null;return new Promise((resolve,reject)=>{const request=indexedDB.open("notion-pwa-v02",1);request.onupgradeneeded=()=>{const db=request.result;if(!db.objectStoreNames.contains("state"))db.createObjectStore("state");if(!db.objectStoreNames.contains("pending"))db.createObjectStore("pending",{keyPath:"id"});};request.onsuccess=()=>{this.db=request.result;resolve(this.db);};request.onerror=()=>reject(request.error);});},
+  async load(){if(!this.db)return null;return new Promise(resolve=>{const request=this.db.transaction("state").objectStore("state").get("current");request.onsuccess=()=>resolve(request.result||null);request.onerror=()=>resolve(null);});},
+  save(snapshot){if(this.db)this.db.transaction("state","readwrite").objectStore("state").put(snapshot,"current");},
+  enqueue(change){if(this.db)this.db.transaction("pending","readwrite").objectStore("pending").put({...change,id:change.key,queuedAt:new Date().toISOString(),baseVersion:change.baseVersion||0});},
+  pendingCount(){if(!this.db)return Promise.resolve(0);return new Promise(resolve=>{const request=this.db.transaction("pending").objectStore("pending").count();request.onsuccess=()=>resolve(request.result);request.onerror=()=>resolve(0);});},
+  async flush(){const count=await this.pendingCount();setSyncState(count?`${count} 项本地待同步 · 未连接 Notion`:"本地已暂存 · 未连接 Notion");return {status:"offline-demo",count};}
+};
 
-function visibleColumns(db=state.db) {
-  const keys=db==="purchases" ? ["name","category","code","quantity","unitPrice","purchaseDate","status","totalCost","saleIds"] : ["customer","purchaseIds","quantity","salePrice","shipping","saleDate","netIncome"];
-  return keys.map(key=>databaseMeta[db].schema.find(field=>field.key===key));
-}
+const pendingChanges=new Map();
+let commitTimer=null;
+function queueChange(key,type,payload={}){pendingChanges.set(key,{key,type,payload});setSyncState("变更待写入本地队列");clearTimeout(commitTimer);commitTimer=setTimeout(commitPendingChanges,1000);}
+function commitPendingChanges(){clearTimeout(commitTimer);commitTimer=null;pendingChanges.forEach(change=>dataAdapter.enqueue(change));pendingChanges.clear();dataAdapter.save({data,categories,savedAt:new Date().toISOString(),localVersion:Date.now()});dataAdapter.flush();}
+function setSyncState(message){const element=$("#sync-state");if(element)element.textContent=message;}
 
-function render() {
-  const meta=databaseMeta[state.db], records=filteredRecords();
-  $$(".tab").forEach(tab=>tab.classList.toggle("active",tab.dataset.db===state.db));
-  $("#purchase-count").textContent=data.purchases.length; $("#sale-count").textContent=data.sales.length;
-  $("#view-title").textContent=meta.title; $("#view-subtitle").textContent=meta.subtitle;
-  renderFilter(); renderTable(records); renderCards(records);
-  $("#empty-state").hidden=records.length>0;
-}
+function getSchema(db=state.db){return databaseMeta[db].schema;}
+function getRecord(db,id){return data[db].find(record=>record.id===id);}
+function sortedMajors(){return [...categories.major].sort((a,b)=>a.sort-b.sort);}
+function sortedSubs(majorId){return categories.sub.filter(item=>item.majorId===majorId).sort((a,b)=>a.sort-b.sort);}
+function categoryName(id,type){return categories[type].find(item=>item.id===id)?.name||"";}
+function normalizedName(value){return value.trim().toLocaleLowerCase("zh-CN");}
+function isUniqueCategoryName(name,ignoreId=""){const wanted=normalizedName(name);return wanted&&![...categories.major,...categories.sub].some(item=>item.id!==ignoreId&&normalizedName(item.name)===wanted);}
+function recordLabel(record,db="purchases"){return record[databaseMeta[db].primary]||"（未命名记录）";}
+function formula(db,record,key){if(db==="purchases"&&key==="totalCost")return Math.round((+record.quantity||0)*(+record.unitPrice||0)*(+record.exchangeRate||0)*(1-(+record.discount||0)/100));if(db==="sales"&&key==="netIncome")return(+record.salePrice||0)-(+record.shipping||0);return"";}
+function displayValue(db,record,field){if(!record)return"";if(field.type==="formula")return formula(db,record,field.key).toLocaleString("zh-CN");if(field.type==="relation")return(record[field.key]||[]).map(id=>recordLabel(getRecord(field.target,id)||{},field.target)).join("、");if(field.type==="category-major")return categoryName(record[field.key],"major");if(field.type==="category-sub")return categoryName(record[field.key],"sub");if(field.type==="photos")return`${(record.photos||[]).length} 张`;if(["unitPrice","salePrice","shipping"].includes(field.key))return(+record[field.key]||0).toLocaleString("zh-CN");return record[field.key]??"";}
+function escapeHtml(value){return String(value??"").replace(/[&<>\"]/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;",'\"':"&quot;"}[char]));}
+function toast(message){const element=$("#toast");element.textContent=message;element.classList.add("show");clearTimeout(toast.timer);toast.timer=setTimeout(()=>element.classList.remove("show"),1900);}
+async function copyText(text){try{await navigator.clipboard.writeText(String(text));toast("已复制到剪贴板");}catch{const area=document.createElement("textarea");area.value=String(text);document.body.append(area);area.select();document.execCommand("copy");area.remove();toast("已复制到剪贴板");}}
+function sortedPhotos(record){return[...(record.photos||[])].sort((a,b)=>{if(!a.date&&!b.date)return 0;if(!a.date)return 1;if(!b.date)return-1;return b.date.localeCompare(a.date);});}
+function primaryPhoto(record){const photos=record.photos||[];return photos.find(photo=>photo.id===record.primaryPhotoId)||sortedPhotos(record)[0]||null;}
 
-function renderFilter() {
-  const select=$("#filter"), previous=state.filter;
-  const options=[['all','全部记录'],['linked','已有跨表关联'],['unlinked','尚未关联']];
-  if(state.db==="purchases") options.push(...["待采购","已采购","已入库","部分售出","已售罄"].map(v=>[`value:status:${v}`,v]));
-  select.innerHTML=options.map(([value,label])=>`<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join("");
-  select.value=[...select.options].some(o=>o.value===previous)?previous:"all"; state.filter=select.value;
-}
+function filteredRecords(){const meta=databaseMeta[state.db];return data[state.db].filter(record=>{const haystack=getSchema().map(field=>displayValue(state.db,record,field)).join(" ").toLowerCase();let ok=haystack.includes(state.query.toLowerCase());if(state.filter==="linked")ok=ok&&(record[meta.relationKey]||[]).length>0;if(state.filter==="unlinked")ok=ok&&(record[meta.relationKey]||[]).length===0;if(state.filter.startsWith("value:")){const[,key,value]=state.filter.split(":");ok=ok&&String(record[key])===value;}return ok;});}
+function visibleColumns(db=state.db){const keys=db==="purchases"?["name","majorCategoryId","subCategoryId","photos","code","quantity","unitPrice","purchaseDate","status","totalCost","saleIds"]:["customer","purchaseIds","quantity","salePrice","shipping","saleDate","netIncome"];return keys.map(key=>databaseMeta[db].schema.find(field=>field.key===key));}
 
-function renderTable(records) {
-  const columns=visibleColumns();
-  $("#desktop-table").innerHTML=`<table><thead><tr>${columns.map(f=>`<th>${escapeHtml(f.label)}</th>`).join("")}<th class="row-actions">操作</th></tr></thead><tbody>${records.map(record=>`<tr data-id="${record.id}">${columns.map(field=>{
-    if(field.type==="relation") return `<td data-key="${field.key}">${relationButtons(record,field)}</td>`;
-    const value=displayValue(state.db,record,field); return `<td data-key="${field.key}" title="${escapeHtml(value)}" class="${field.key===databaseMeta[state.db].primary?'name-cell ':''}${field.type==='number'||field.type==='formula'?'money':''}">${escapeHtml(value)||'<span class="muted">—</span>'}</td>`;
-  }).join("")}<td class="row-actions"><button data-edit="${record.id}">编辑</button></td></tr>`).join("")}</tbody></table>`;
-}
-function relationButtons(record,field) {
-  const ids=record[field.key]||[];
-  if(!ids.length) return '<span class="muted">未关联</span>';
-  return ids.map(id=>`<button class="relation-chip" data-jump-db="${field.target}" data-jump-id="${id}">${escapeHtml(getRecord(field.target,id)?.[databaseMeta[field.target].primary]||"已删除")}</button>`).join("");
-}
-function renderCards(records) {
-  const meta=databaseMeta[state.db], fields=visibleColumns().filter(f=>f.type!=="relation").slice(1,5), relation=getSchema().find(f=>f.type==="relation");
-  $("#mobile-cards").innerHTML=records.map(record=>`<article class="record-card" data-id="${record.id}"><div class="card-top"><h3>${escapeHtml(record[meta.primary]||"未命名")}</h3><button data-edit="${record.id}">编辑</button></div><div class="card-meta">${fields.map(f=>`<div><small>${escapeHtml(f.label)}</small><span>${escapeHtml(displayValue(state.db,record,f))||"—"}</span></div>`).join("")}</div><div class="card-relations"><small class="muted">${escapeHtml(relation.label)}</small><div>${relationButtons(record,relation)}</div></div></article>`).join("");
-}
+function render(){const meta=databaseMeta[state.db],records=filteredRecords();$$(".tab").forEach(tab=>tab.classList.toggle("active",tab.dataset.db===state.db));$("#purchase-count").textContent=data.purchases.length;$("#sale-count").textContent=data.sales.length;$("#view-title").textContent=meta.title;$("#view-subtitle").textContent=meta.subtitle;const showHome=state.db==="purchases";$("#home-controls").hidden=!showHome;$("#category-browser").hidden=!showHome;renderFilter();renderCategoryBrowser();renderTable(records);renderMobileHome(records);$("#empty-state").hidden=records.length>0;}
+function renderFilter(){const select=$("#filter"),previous=state.filter;const options=[["all","全部记录"],["linked","已有跨表关联"],["unlinked","尚未关联"]];if(state.db==="purchases")options.push(...["待采购","已采购","已入库","部分售出","已售罄"].map(value=>[`value:status:${value}`,value]));select.innerHTML=options.map(([value,label])=>`<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join("");select.value=[...select.options].some(option=>option.value===previous)?previous:"all";state.filter=select.value;}
+function renderCategoryBrowser(){if(state.db!=="purchases")return;const majors=sortedMajors();if(!majors.some(item=>item.id===state.selectedMajorId))state.selectedMajorId=majors[0]?.id||"";const subs=sortedSubs(state.selectedMajorId);if(!subs.some(item=>item.id===state.selectedSubId))state.selectedSubId=subs[0]?.id||"";$("#major-categories").innerHTML=majors.map(item=>`<button data-major="${item.id}" class="${item.id===state.selectedMajorId?'active':''}">${escapeHtml(item.name)}</button>`).join("");$("#sub-categories").innerHTML=subs.map(item=>`<button data-sub="${item.id}" class="${item.id===state.selectedSubId?'active':''}">${escapeHtml(item.name)}</button>`).join("")||'<span class="muted">暂无小分类</span>';$$("[data-layout]").forEach(button=>button.classList.toggle("active",button.dataset.layout===preferences.layout));$("#column-count").value=String(preferences.columns);}
+function renderTable(records){const columns=visibleColumns();$("#desktop-table").innerHTML=`<table><thead><tr>${columns.map(field=>`<th>${escapeHtml(field.label)}</th>`).join("")}<th class="row-actions">操作</th></tr></thead><tbody>${records.map(record=>`<tr data-id="${record.id}">${columns.map(field=>field.type==="relation"?`<td data-key="${field.key}">${relationButtons(record,field)}</td>`:`<td data-key="${field.key}" title="${escapeHtml(displayValue(state.db,record,field))}" class="${field.key===databaseMeta[state.db].primary?'name-cell ':''}${field.type==='number'||field.type==='formula'?'money':''}">${escapeHtml(displayValue(state.db,record,field))||'<span class="muted">—</span>'}</td>`).join("")}<td class="row-actions"><button data-edit="${record.id}">编辑</button></td></tr>`).join("")}</tbody></table>`;}
+function relationButtons(record,field){const ids=record[field.key]||[];if(!ids.length)return'<span class="muted">未关联</span>';return ids.map(id=>`<button class="relation-chip" data-jump-db="${field.target}" data-jump-id="${id}">${escapeHtml(recordLabel(getRecord(field.target,id)||{},field.target))}</button>`).join("");}
+function thumbnailGrid(records){return`<div class="thumb-grid" style="--grid-columns:${Number(preferences.columns)||4}">${records.map(record=>{const photo=primaryPhoto(record);return`<button class="thumb-card" data-edit="${record.id}"><span class="thumb-image">${photo?`<img src="${escapeHtml(photo.url||"")}" alt="">`:'<span class="thumb-placeholder">◇</span>'}${(record.photos||[]).length>1?`<span class="photo-count">${record.photos.length}</span>`:""}</span><strong>${escapeHtml(recordLabel(record))}</strong></button>`;}).join("")}</div>`;}
+function renderMobileHome(records){if(state.db!=="purchases"){$("#mobile-home").innerHTML=records.map(record=>`<article class="record-card"><div class="card-top"><h3>${escapeHtml(recordLabel(record,"sales"))}</h3><button data-edit="${record.id}">编辑</button></div><div class="card-relations">${relationButtons(record,saleSchema[1])}</div></article>`).join("");return;}if(preferences.layout==="gallery"){$("#mobile-home").innerHTML=thumbnailGrid(records);return;}if(preferences.layout==="category"){const scoped=records.filter(record=>record.subCategoryId===state.selectedSubId);$("#mobile-home").innerHTML=scoped.length?thumbnailGrid(scoped):'<div class="empty">该小分类暂无记录。</div>';return;}const modules={category:{title:"当前小分类",records:records.filter(record=>record.subCategoryId===state.selectedSubId)},recent:{title:"最近采购",records:[...records].sort((a,b)=>(b.purchaseDate||"").localeCompare(a.purchaseDate||"")).slice(0,8)},unlinked:{title:"尚未关联售出",records:records.filter(record=>!(record.saleIds||[]).length).slice(0,8)}},allIds=["category","recent","unlinked"];const config=`<div class="custom-config"><span>显示模块：</span>${allIds.map(id=>`<button data-module-toggle="${id}" class="${preferences.modules.includes(id)?'active':''}">${modules[id].title}</button>`).join("")}</div>`;$("#mobile-home").innerHTML=config+(preferences.modules.length?preferences.modules.map((id,index)=>`<section class="custom-module"><div class="custom-module-head"><h3>${modules[id].title}</h3><span><button data-module-move="${id}" data-direction="-1" ${index===0?'disabled':''}>↑</button><button data-module-move="${id}" data-direction="1" ${index===preferences.modules.length-1?'disabled':''}>↓</button></span></div>${modules[id].records.length?thumbnailGrid(modules[id].records):'<span class="muted">暂无记录</span>'}</section>`).join(""):'<div class="empty">请选择至少一个首页模块。</div>');}
 
-function blankRecord(db) {
-  const record={id:(db==="purchases"?"p":"s")+(++idCounter)};
-  getSchema(db).forEach(field=>{ if(field.type==="relation") record[field.key]=[]; else if(field.type==="number") record[field.key]=0; else if(field.type!=="formula") record[field.key]=field.options?.[0]||""; });
-  if(db==="purchases") { record.currency="JPY"; record.exchangeRate=1; record.discount=0; record.status="待采购"; }
-  return record;
-}
+function blankRecord(db){const record={id:(db==="purchases"?"p":"s")+(++idCounter)};getSchema(db).forEach(field=>{if(field.type==="relation")record[field.key]=[];else if(field.type==="photos")record.photos=[];else if(field.type==="number")record[field.key]=0;else if(!["formula","category-major","category-sub"].includes(field.type))record[field.key]=field.options?.[0]||"";});if(db==="purchases"){record.majorCategoryId=state.selectedMajorId;record.subCategoryId=state.selectedSubId;record.primaryPhotoId="";record.currency="JPY";record.exchangeRate=1;record.status="待采购";}return record;}
+function openRecord(db,id,{pushHistory=false}={}){if(pushHistory&&state.editing)state.history.push({...state.editing});state.editing={db,id};const record=getRecord(db,id),meta=databaseMeta[db];if(!record)return;state.photoDraft=structuredClone(record.photos||[]);state.primaryPhotoDraft=record.primaryPhotoId||"";$("#dialog-db").textContent=meta.title;$("#dialog-title").textContent=recordLabel(record,db);$("#back-record").hidden=state.history.length===0;const groups=[...new Set(meta.schema.map(field=>field.group))];$("#form-fields").innerHTML=groups.map((group,index)=>`<details class="field-group" ${index<3?'open':''}><summary>${escapeHtml(group)}</summary><div class="field-grid">${meta.schema.filter(field=>field.group===group).map(field=>fieldControl(db,record,field)).join("")}</div></details>`).join("");const dialog=$("#record-dialog");if(!dialog.open)dialog.showModal();}
+function fieldControl(db,record,field){const value=record[field.key]??"",copy=`<button type="button" data-copy-field="${field.key}">复制</button>`;let control="";if(field.type==="formula")control=`<output>${escapeHtml(displayValue(db,record,field))}</output>`;else if(field.type==="select")control=`<select name="${field.key}">${field.options.map(option=>`<option ${value===option?'selected':''}>${escapeHtml(option)}</option>`).join("")}</select>`;else if(field.type==="textarea")control=`<textarea name="${field.key}" rows="3">${escapeHtml(value)}</textarea>`;else if(field.type==="relation")return`<div class="field full"><span class="field-label"><span>${escapeHtml(field.label)}</span>${copy}</span><div class="relation-options">${data[field.target].map(target=>`<div class="relation-option"><label><input type="checkbox" name="${field.key}" value="${target.id}" ${(value||[]).includes(target.id)?'checked':''}><span>${escapeHtml(recordLabel(target,field.target))}</span></label><button type="button" data-jump-db="${field.target}" data-jump-id="${target.id}" title="请先保存当前修改">打开原记录</button></div>`).join("")||'<span class="muted">目标数据库暂无记录</span>'}</div></div>`;else if(field.type==="category-major")control=`<div class="category-pair"><select name="majorCategoryId" required>${sortedMajors().map(item=>`<option value="${item.id}" ${value===item.id?'selected':''}>${escapeHtml(item.name)}</option>`).join("")}</select><button type="button" data-inline-category="major">＋ 就地新建</button></div>`;else if(field.type==="category-sub")control=categorySubControl(value,record.majorCategoryId);else if(field.type==="photos")return`<div class="field full"><span class="field-label"><span>照片与首图</span><span>${state.photoDraft.length} 张</span></span>${photoEditor()}</div>`;else control=`<input name="${field.key}" type="${field.type}" value="${escapeHtml(value)}" ${field.required?'required':''} ${field.min!==undefined?`min="${field.min}"`:''} ${field.max!==undefined?`max="${field.max}"`:''} ${field.step?`step="${field.step}"`:''}>`;return`<label class="field ${field.full?'full':''}"><span class="field-label"><span>${escapeHtml(field.label)}</span>${copy}</span>${control}</label>`;}
+function categorySubControl(value,majorId){return`<div class="category-pair"><select name="subCategoryId" required>${sortedSubs(majorId).map(item=>`<option value="${item.id}" ${value===item.id?'selected':''}>${escapeHtml(item.name)}</option>`).join("")}</select><button type="button" data-inline-category="sub">＋ 就地新建</button></div>`;}
+function photoEditor(){const pseudo={photos:state.photoDraft,primaryPhotoId:state.primaryPhotoDraft};return`<div class="photo-editor"><label class="photo-upload"><input id="photo-input" type="file" accept="image/*,.heic,.heif" capture="environment" multiple>拍摄或选择多张照片</label><p class="photo-note">日期顺序：照片拍摄时间 → 文件时间 → 未知。不会把本次上传时间当作原始日期；HEIC 兼容性需在手机人工验证。</p><div class="photo-list">${sortedPhotos(pseudo).map(photo=>`<div class="photo-item" data-photo-id="${photo.id}"><img src="${escapeHtml(photo.url||"")}" alt=""><div class="photo-info"><strong>${escapeHtml(photo.name)}</strong><small class="${photo.date?'':'unknown-date'}">${photo.date?`${photo.date} · ${photo.dateSource}`:'日期未知 · 请人工指定'}</small><input type="date" data-photo-date="${photo.id}" value="${escapeHtml(photo.date||"")}" aria-label="人工指定照片日期"></div><div class="photo-actions"><button type="button" data-photo-primary="${photo.id}">${primaryPhoto(pseudo)?.id===photo.id?'✓ 首图':'设为首图'}</button><button type="button" data-photo-delete="${photo.id}" class="danger">删除</button></div></div>`).join("")||'<span class="muted">暂无照片；记录仍可保存和打开。</span>'}</div></div>`;}
+function refreshPhotoEditor(){const container=$(".photo-editor");if(container)container.outerHTML=photoEditor();}
 
-function openRecord(db,id,{pushHistory=false}={}) {
-  if(pushHistory && state.editing) state.history.push({...state.editing});
-  state.editing={db,id};
-  const record=getRecord(db,id), meta=databaseMeta[db]; if(!record) return;
-  $("#dialog-db").textContent=meta.title; $("#dialog-title").textContent=record[meta.primary]||"新记录";
-  $("#back-record").hidden=state.history.length===0;
-  const groups=[...new Set(meta.schema.map(field=>field.group))];
-  $("#form-fields").innerHTML=groups.map((group,index)=>`<details class="field-group" ${index<2?'open':''}><summary>${escapeHtml(group)}</summary><div class="field-grid">${meta.schema.filter(field=>field.group===group).map(field=>fieldControl(db,record,field)).join("")}</div></details>`).join("");
-  const dialog=$("#record-dialog"); if(!dialog.open) dialog.showModal();
-}
-function fieldControl(db,record,field) {
-  const value=record[field.key]??"", copy=`<button type="button" data-copy-field="${field.key}">复制</button>`;
-  let control="";
-  if(field.type==="formula") control=`<output>${escapeHtml(displayValue(db,record,field))}</output>`;
-  else if(field.type==="select") control=`<select name="${field.key}">${field.options.map(option=>`<option ${value===option?'selected':''}>${escapeHtml(option)}</option>`).join("")}</select>`;
-  else if(field.type==="textarea") control=`<textarea name="${field.key}" rows="3">${escapeHtml(value)}</textarea>`;
-  else if(field.type==="relation") control=`<div class="relation-options">${data[field.target].map(target=>`<label><input type="checkbox" name="${field.key}" value="${target.id}" ${(value||[]).includes(target.id)?'checked':''}> <span>${escapeHtml(target[databaseMeta[field.target].primary])}</span></label>`).join("")||'<span class="muted">目标数据库暂无记录</span>'}</div>`;
-  else control=`<input name="${field.key}" type="${field.type}" value="${escapeHtml(value)}" ${field.required?'required':''} ${field.min!==undefined?`min="${field.min}"`:''} ${field.max!==undefined?`max="${field.max}"`:''} ${field.step?`step="${field.step}"`:''}>`;
-  return `<label class="field ${field.full?'full':''}"><span class="field-label"><span>${escapeHtml(field.label)}</span>${copy}</span>${control}</label>`;
-}
+function readForm(db,base){const form=$("#record-form"),result={...base};getSchema(db).forEach(field=>{if(field.type==="formula")return;if(field.type==="photos"){result.photos=state.photoDraft;result.primaryPhotoId=state.photoDraft.some(photo=>photo.id===state.primaryPhotoDraft)?state.primaryPhotoDraft:"";return;}if(field.type==="relation")result[field.key]=[...form.querySelectorAll(`[name="${field.key}"]:checked`)].map(input=>input.value);else{const input=form.elements[field.key];result[field.key]=field.type==="number"?Number(input.value||0):input.value.trim();}});return result;}
+function syncRelations(db,id,newIds){const meta=databaseMeta[db],reverse=databaseMeta[meta.target].relationKey;data[meta.target].forEach(target=>{target[reverse]=(target[reverse]||[]).filter(linked=>linked!==id);});newIds.forEach(targetId=>{const target=getRecord(meta.target,targetId);if(target&&!target[reverse].includes(id))target[reverse].push(id);});}
+function saveEditing(){const{db,id}=state.editing,index=data[db].findIndex(record=>record.id===id);if(index<0)return;const updated=readForm(db,data[db][index]);if(db==="purchases"&&!sortedSubs(updated.majorCategoryId).some(item=>item.id===updated.subCategoryId)){toast("请选择该大分类所属的小分类");return;}data[db][index]=updated;syncRelations(db,id,updated[databaseMeta[db].relationKey]||[]);state.creating=null;queueChange(`record:${db}:${id}`,"record-update",{db,id});render();closeRecord();toast("修改已在本机暂存");}
+function closeRecord(){if(state.creating&&state.editing?.id===state.creating.id){data[state.creating.db]=data[state.creating.db].filter(record=>record.id!==state.creating.id);state.creating=null;render();}$("#record-dialog").close();state.editing=null;state.history=[];state.photoDraft=[];}
+function deleteEditing(){const{db,id}=state.editing,record=getRecord(db,id);if(!record||!confirm(`删除“${recordLabel(record,db)}”？关联记录会同步解除。`))return;syncRelations(db,id,[]);data[db]=data[db].filter(item=>item.id!==id);state.creating=null;queueChange(`record:${db}:${id}`,"record-delete",{db,id});closeRecord();render();toast("记录已从本地暂存中删除");}
+function recordAsText(db,record){return getSchema(db).map(field=>`${field.label}: ${displayValue(db,record,field)}`).join("\n");}
 
-function readForm(db,base) {
-  const form=$("#record-form"), result={...base};
-  getSchema(db).forEach(field=>{
-    if(field.type==="formula") return;
-    if(field.type==="relation") result[field.key]=[...form.querySelectorAll(`[name="${field.key}"]:checked`)].map(input=>input.value);
-    else { const input=form.elements[field.key]; result[field.key]=field.type==="number" ? Number(input.value||0) : input.value.trim(); }
-  });
-  return result;
-}
-function syncRelations(db,id,newIds) {
-  const meta=databaseMeta[db], reverse=databaseMeta[meta.target].relationKey;
-  data[meta.target].forEach(target=>{ target[reverse]=(target[reverse]||[]).filter(linked=>linked!==id); });
-  newIds.forEach(targetId=>{ const target=getRecord(meta.target,targetId); if(target&&!target[reverse].includes(id)) target[reverse].push(id); });
-}
-function saveEditing() {
-  const {db,id}=state.editing, index=data[db].findIndex(record=>record.id===id); if(index<0) return;
-  const updated=readForm(db,data[db][index]); data[db][index]=updated;
-  syncRelations(db,id,updated[databaseMeta[db].relationKey]||[]); state.creating=null; render(); closeRecord(); toast("修改已保存于本次会话");
-}
-function closeRecord() {
-  if(state.creating && state.editing?.id===state.creating.id) {
-    data[state.creating.db]=data[state.creating.db].filter(record=>record.id!==state.creating.id);
-    state.creating=null; render();
-  }
-  $("#record-dialog").close(); state.editing=null; state.history=[];
-}
-function deleteEditing() {
-  const {db,id}=state.editing, record=getRecord(db,id); if(!record||!confirm(`删除“${record[databaseMeta[db].primary]}”？关联记录会同步解除。`)) return;
-  syncRelations(db,id,[]); data[db]=data[db].filter(item=>item.id!==id); closeRecord(); render(); toast("记录已删除（刷新可恢复）");
-}
-function recordAsText(db,record) { return getSchema(db).map(field=>`${field.label}: ${displayValue(db,record,field)}`).join("\n"); }
+async function photoDateFromFile(file){try{if(/jpe?g/i.test(file.type)||/\.jpe?g$/i.test(file.name)){const date=await readExifDate(file);if(date)return{date,source:"拍摄时间"};}}catch{}if(file.lastModified>0){const date=new Date(file.lastModified);if(!Number.isNaN(date.getTime()))return{date:date.toISOString().slice(0,10),source:"文件时间"};}return{date:"",source:"未知"};}
+async function readExifDate(file){const view=new DataView(await file.arrayBuffer());if(view.byteLength<4||view.getUint16(0)!==0xffd8)return"";let offset=2;while(offset+4<view.byteLength){if(view.getUint8(offset)!==0xff)break;const marker=view.getUint8(offset+1),length=view.getUint16(offset+2);if(marker===0xe1&&length>8&&view.getUint32(offset+4)===0x45786966){const tiff=offset+10,little=view.getUint16(tiff)===0x4949,get16=position=>view.getUint16(position,little),get32=position=>view.getUint32(position,little);const ifd=tiff+get32(tiff+4),count=get16(ifd);let exifOffset=0;for(let index=0;index<count;index++){const entry=ifd+2+index*12;if(get16(entry)===0x8769)exifOffset=tiff+get32(entry+8);}if(exifOffset){const exifCount=get16(exifOffset);for(let index=0;index<exifCount;index++){const entry=exifOffset+2+index*12;if(get16(entry)===0x9003){const pointer=tiff+get32(entry+8);let raw="";for(let cursor=0;cursor<19&&pointer+cursor<view.byteLength;cursor++)raw+=String.fromCharCode(view.getUint8(pointer+cursor));const match=raw.match(/(\d{4}):(\d{2}):(\d{2})/);if(match)return`${match[1]}-${match[2]}-${match[3]}`;}}}}offset+=2+length;}return"";}
+async function addPhotoFiles(files){for(const file of files){const info=await photoDateFromFile(file);state.photoDraft.push({id:`photo-${Date.now()}-${++idCounter}`,name:file.name,url:URL.createObjectURL(file),blob:file,date:info.date,dateSource:info.source});}refreshPhotoEditor();toast(`已加入 ${files.length} 张照片；保存记录后暂存`);}
 
-function parseCell(field,value) {
-  if(field.type==="number") { const normalized=String(value).replace(/[,，￥¥$€%\s]/g,""); const parsed=Number(normalized); return Number.isFinite(parsed)?parsed:0; }
-  if(field.type==="select") return field.options.includes(value)?value:(value||field.options[0]);
-  return value;
-}
-function openPaste() {
-  const columns=visibleColumns().filter(field=>field.type!=="relation"&&field.type!=="formula");
-  const startIndex=state.selected ? Math.max(0,columns.findIndex(f=>f.key===state.selected.key)) : 0;
-  $("#paste-help").textContent=`从“${columns[startIndex].label}”列开始，依次对应：${columns.slice(startIndex).map(f=>f.label).join(" → ")}。超出现有记录的行会新增。公式和关联字段请在编辑窗口维护。`;
-  $("#paste-input").value=""; $("#paste-preview").textContent=""; $("#paste-dialog").showModal(); setTimeout(()=>$("#paste-input").focus(),50);
-}
-function applyPaste() {
-  const rows=$("#paste-input").value.replace(/\r/g,"").split("\n").filter(line=>line.length).map(line=>line.split("\t"));
-  if(!rows.length) return toast("没有可应用的数据");
-  const columns=visibleColumns().filter(field=>field.type!=="relation"&&field.type!=="formula");
-  const startCol=state.selected?Math.max(0,columns.findIndex(f=>f.key===state.selected.key)):0;
-  const startRow=state.selected?Math.max(0,data[state.db].findIndex(r=>r.id===state.selected.id)):data[state.db].length;
-  rows.forEach((cells,rowOffset)=>{
-    let record=data[state.db][startRow+rowOffset]; if(!record){record=blankRecord(state.db); data[state.db].push(record);}
-    cells.forEach((value,colOffset)=>{ const field=columns[startCol+colOffset]; if(field) record[field.key]=parseCell(field,value.trim()); });
-  });
-  $("#paste-dialog").close(); render(); toast(`已应用 ${rows.length} 行数据`);
-}
+function parseCell(field,value){if(field.type==="number"){const parsed=Number(String(value).replace(/[,，￥¥$€%\s]/g,""));return Number.isFinite(parsed)?parsed:0;}if(field.type==="select")return field.options.includes(value)?value:(value||field.options[0]);return value;}
+function openPaste(){const columns=visibleColumns().filter(field=>!["relation","formula","photos","category-major","category-sub"].includes(field.type));const startIndex=state.selected?Math.max(0,columns.findIndex(field=>field.key===state.selected.key)):0;$("#paste-help").textContent=`从“${columns[startIndex].label}”列开始，依次对应：${columns.slice(startIndex).map(field=>field.label).join(" → ")}。新增行使用当前所选分类；分类、照片、公式和关联请在编辑窗口维护。`;$("#paste-input").value="";$("#paste-preview").textContent="";$("#paste-dialog").showModal();setTimeout(()=>$("#paste-input").focus(),50);}
+function applyPaste(){const rows=$("#paste-input").value.replace(/\r/g,"").split("\n").filter(line=>line.length).map(line=>line.split("\t"));if(!rows.length)return toast("没有可应用的数据");const columns=visibleColumns().filter(field=>!["relation","formula","photos","category-major","category-sub"].includes(field.type));const startCol=state.selected?Math.max(0,columns.findIndex(field=>field.key===state.selected.key)):0,startRow=state.selected?Math.max(0,data[state.db].findIndex(record=>record.id===state.selected.id)):data[state.db].length;rows.forEach((cells,rowOffset)=>{let record=data[state.db][startRow+rowOffset];if(!record){record=blankRecord(state.db);data[state.db].push(record);}cells.forEach((value,colOffset)=>{const field=columns[startCol+colOffset];if(field)record[field.key]=parseCell(field,value.trim());});});queueChange(`paste:${state.db}`,"grid-paste",{rows:rows.length});$("#paste-dialog").close();render();toast(`已应用 ${rows.length} 行数据`);}
+
+function addCategory(type,majorId=state.selectedMajorId){const label=type==="major"?"大分类":"小分类",name=prompt(`输入新${label}名称：`);if(name===null)return"";if(!isUniqueCategoryName(name)){toast("分类名称必须全局唯一且不能为空");return"";}const list=type==="major"?categories.major:categories.sub,id=`${type==="major"?'m':'c'}${Date.now()}`;const item={id,name:name.trim(),sort:Math.max(0,...list.filter(entry=>type==="major"||entry.majorId===majorId).map(entry=>entry.sort))+10};if(type==="sub")item.majorId=majorId;list.push(item);if(type==="major"){state.selectedMajorId=id;state.selectedSubId="";}else state.selectedSubId=id;queueChange(`category:${type}:${id}`,"category-create",item);render();if($("#category-dialog").open)renderCategoryManager();requestAnimationFrame(()=>$(type==="major"?"#major-categories":"#sub-categories")?.lastElementChild?.scrollIntoView({behavior:"smooth",inline:"end"}));return id;}
+function renameCategory(type,id,name){const item=categories[type].find(entry=>entry.id===id);if(!item)return;if(!isUniqueCategoryName(name,id)){toast("分类名称必须全局唯一且不能为空");renderCategoryManager();return;}item.name=name.trim();queueChange(`category:${type}:${id}`,"category-rename",{id,name:item.name});render();renderCategoryManager();}
+function deleteCategory(type,id){let used=false;if(type==="major")used=categories.sub.some(item=>item.majorId===id)||data.purchases.some(record=>record.majorCategoryId===id);else used=data.purchases.some(record=>record.subCategoryId===id);if(used){toast("该分类仍有关联记录或下级分类，请先迁移");return;}categories[type]=categories[type].filter(item=>item.id!==id);queueChange(`category:${type}:${id}`,"category-delete",{id});render();renderCategoryManager();}
+function moveCategory(type,id,direction){const item=categories[type].find(entry=>entry.id===id);if(!item)return;const siblings=type==="major"?sortedMajors():sortedSubs(item.majorId),index=siblings.findIndex(entry=>entry.id===id),swap=siblings[index+direction];if(!swap)return;[item.sort,swap.sort]=[swap.sort,item.sort];const finalOrder=type==="major"?sortedMajors():sortedSubs(item.majorId);queueChange(`sort:${type}:${item.majorId||"root"}`,"category-sort",{order:finalOrder.map(entry=>entry.id)});render();renderCategoryManager();}
+function reorderByDrop(type,draggedId,targetId){const dragged=categories[type].find(item=>item.id===draggedId),target=categories[type].find(item=>item.id===targetId);if(!dragged||!target||(type==="sub"&&dragged.majorId!==target.majorId))return;const siblings=type==="major"?sortedMajors():sortedSubs(dragged.majorId),from=siblings.findIndex(item=>item.id===draggedId),to=siblings.findIndex(item=>item.id===targetId);siblings.splice(to,0,siblings.splice(from,1)[0]);siblings.forEach((item,index)=>item.sort=(index+1)*10);queueChange(`sort:${type}:${dragged.majorId||"root"}`,"category-sort",{order:siblings.map(item=>item.id)});render();renderCategoryManager();}
+function openCategoryManager(){renderCategoryManager();$("#category-dialog").showModal();}
+function managerRows(type,items){return items.map((item,index)=>`<div class="sort-row ${type==='major'&&item.id===state.selectedMajorId?'current':''}" draggable="true" data-sort-type="${type}" data-sort-id="${item.id}"><span class="drag-handle" title="拖动排序">≡</span><input value="${escapeHtml(item.name)}" data-category-name="${type}:${item.id}" aria-label="分类名称"><button type="button" data-category-move="${type}:${item.id}" data-direction="${index===0?1:-1}" title="移动">${index===0?'↓':'↑'}</button>${type==='major'?`<button type="button" data-manager-major="${item.id}">小分类</button>`:'<span></span>'}<button type="button" data-category-delete="${type}:${item.id}" class="danger">删除</button></div>`).join("");}
+function renderCategoryManager(){const majors=sortedMajors();if(!majors.some(item=>item.id===state.selectedMajorId))state.selectedMajorId=majors[0]?.id||"";$("#major-manager").innerHTML=managerRows("major",majors);$("#sub-manager").innerHTML=managerRows("sub",sortedSubs(state.selectedMajorId));const subs=categories.sub.slice().sort((a,b)=>a.name.localeCompare(b.name,"zh-CN"));$("#batch-target").innerHTML=subs.map(item=>`<option value="${item.id}">${escapeHtml(categoryName(item.majorId,"major"))} › ${escapeHtml(item.name)}</option>`).join("");$("#batch-records").innerHTML=data.purchases.map(record=>`<label><input type="checkbox" value="${record.id}" name="batch-record"> ${escapeHtml(recordLabel(record))}<small class="muted"> · ${escapeHtml(categoryName(record.subCategoryId,"sub"))}</small></label>`).join("");}
+function previewBatch(){const ids=[...document.querySelectorAll('[name="batch-record"]:checked')].map(input=>input.value),targetId=$("#batch-target").value,target=categories.sub.find(item=>item.id===targetId);if(!ids.length||!target){toast("请选择记录和目标小分类");return;}state.batchDraft={ids,targetId,majorId:target.majorId};$("#batch-preview").innerHTML=`<p>以下 ${ids.length} 条记录将移动到 <strong>${escapeHtml(categoryName(target.majorId,"major"))} › ${escapeHtml(target.name)}</strong>：</p><ul>${ids.map(id=>{const record=getRecord("purchases",id);return`<li>${escapeHtml(recordLabel(record))}：${escapeHtml(categoryName(record.subCategoryId,"sub"))} → ${escapeHtml(target.name)}</li>`;}).join("")}</ul><p class="muted">确认后立即更新画面，并进入本地待同步队列。</p>`;$("#batch-dialog").showModal();}
+function confirmBatch(){const draft=state.batchDraft;if(!draft)return;draft.ids.forEach(id=>{const record=getRecord("purchases",id);if(record){record.majorCategoryId=draft.majorId;record.subCategoryId=draft.targetId;}});queueChange(`batch:${Date.now()}`,"batch-reclassify",draft);$("#batch-dialog").close();state.batchDraft=null;render();renderCategoryManager();toast("批量调整已应用并等待本地暂存");}
 
 document.addEventListener("click",event=>{
-  const tab=event.target.closest(".tab"); if(tab){ state.db=tab.dataset.db; state.query=""; state.filter="all"; state.selected=null; $("#search").value=""; render(); return; }
-  const edit=event.target.closest("[data-edit]"); if(edit){ openRecord(state.db,edit.dataset.edit); return; }
-  const jump=event.target.closest("[data-jump-id]"); if(jump){ openRecord(jump.dataset.jumpDb,jump.dataset.jumpId,{pushHistory:true}); return; }
-  const cell=event.target.closest("td[data-key]"); if(cell&&!event.target.closest("button")){ $$("td.selected").forEach(td=>td.classList.remove("selected")); cell.classList.add("selected"); state.selected={id:cell.closest("tr").dataset.id,key:cell.dataset.key}; }
-  const copy=event.target.closest("[data-copy-field]"); if(copy&&state.editing){ const record=getRecord(state.editing.db,state.editing.id),field=getSchema(state.editing.db).find(f=>f.key===copy.dataset.copyField); copyText(displayValue(state.editing.db,record,field)); }
+  const tab=event.target.closest(".tab");if(tab){state.db=tab.dataset.db;state.query="";state.filter="all";state.selected=null;$("#search").value="";render();return;}
+  const layout=event.target.closest("[data-layout]");if(layout){preferences.layout=layout.dataset.layout;savePreferences();render();return;}
+  const major=event.target.closest("[data-major]");if(major){state.selectedMajorId=major.dataset.major;state.selectedSubId=sortedSubs(state.selectedMajorId)[0]?.id||"";render();return;}
+  const sub=event.target.closest("[data-sub]");if(sub){state.selectedSubId=sub.dataset.sub;render();return;}
+  const edit=event.target.closest("[data-edit]");if(edit){openRecord(state.db,edit.dataset.edit);return;}
+  const jump=event.target.closest("[data-jump-id]");if(jump){openRecord(jump.dataset.jumpDb,jump.dataset.jumpId,{pushHistory:true});return;}
+  const cell=event.target.closest("td[data-key]");if(cell&&!event.target.closest("button")){$$("td.selected").forEach(element=>element.classList.remove("selected"));cell.classList.add("selected");state.selected={id:cell.closest("tr").dataset.id,key:cell.dataset.key};return;}
+  const copy=event.target.closest("[data-copy-field]");if(copy&&state.editing){const record=getRecord(state.editing.db,state.editing.id),field=getSchema(state.editing.db).find(item=>item.key===copy.dataset.copyField);copyText(displayValue(state.editing.db,record,field));return;}
+  const inline=event.target.closest("[data-inline-category]");if(inline){const form=$("#record-form"),majorId=form.elements.majorCategoryId?.value||state.selectedMajorId,newId=addCategory(inline.dataset.inlineCategory,majorId);if(newId&&inline.dataset.inlineCategory==="major"){const select=form.elements.majorCategoryId;select.insertAdjacentHTML("beforeend",`<option value="${newId}">${escapeHtml(categoryName(newId,"major"))}</option>`);select.value=newId;form.elements.subCategoryId.innerHTML="";}if(newId&&inline.dataset.inlineCategory==="sub"){const select=form.elements.subCategoryId;select.insertAdjacentHTML("beforeend",`<option value="${newId}">${escapeHtml(categoryName(newId,"sub"))}</option>`);select.value=newId;}return;}
+  const primary=event.target.closest("[data-photo-primary]");if(primary){state.primaryPhotoDraft=primary.dataset.photoPrimary;refreshPhotoEditor();return;}
+  const photoDelete=event.target.closest("[data-photo-delete]");if(photoDelete){const id=photoDelete.dataset.photoDelete;state.photoDraft=state.photoDraft.filter(photo=>photo.id!==id);if(state.primaryPhotoDraft===id)state.primaryPhotoDraft="";refreshPhotoEditor();return;}
+  const moduleMove=event.target.closest("[data-module-move]");if(moduleMove){const index=preferences.modules.indexOf(moduleMove.dataset.moduleMove),target=index+Number(moduleMove.dataset.direction);if(target>=0&&target<preferences.modules.length){preferences.modules.splice(target,0,preferences.modules.splice(index,1)[0]);savePreferences();render();}return;}
+  const moduleToggle=event.target.closest("[data-module-toggle]");if(moduleToggle){const id=moduleToggle.dataset.moduleToggle,index=preferences.modules.indexOf(id);if(index>=0)preferences.modules.splice(index,1);else preferences.modules.push(id);savePreferences();render();return;}
+  const managerMajor=event.target.closest("[data-manager-major]");if(managerMajor){state.selectedMajorId=managerMajor.dataset.managerMajor;renderCategoryManager();return;}
+  const categoryAdd=event.target.closest("[data-category-add]");if(categoryAdd){addCategory(categoryAdd.dataset.categoryAdd);return;}
+  const categoryMove=event.target.closest("[data-category-move]");if(categoryMove){const[type,id]=categoryMove.dataset.categoryMove.split(":");moveCategory(type,id,Number(categoryMove.dataset.direction));return;}
+  const categoryDelete=event.target.closest("[data-category-delete]");if(categoryDelete){const[type,id]=categoryDelete.dataset.categoryDelete.split(":");deleteCategory(type,id);return;}
 });
+
+document.addEventListener("change",event=>{
+  if(event.target.id==="photo-input"){addPhotoFiles([...event.target.files]);return;}
+  if(event.target.matches("[data-photo-date]")){const photo=state.photoDraft.find(item=>item.id===event.target.dataset.photoDate);if(photo){photo.date=event.target.value;photo.dateSource=event.target.value?"人工指定":"未知";refreshPhotoEditor();}return;}
+  if(event.target.name==="majorCategoryId"){const subSelect=$("#record-form").elements.subCategoryId,subs=sortedSubs(event.target.value);subSelect.innerHTML=subs.map(item=>`<option value="${item.id}">${escapeHtml(item.name)}</option>`).join("");return;}
+  if(event.target.matches("[data-category-name]")){const[type,id]=event.target.dataset.categoryName.split(":");renameCategory(type,id,event.target.value);}
+});
+
+let draggedCategory=null;
+document.addEventListener("dragstart",event=>{const row=event.target.closest("[data-sort-id]");if(row){draggedCategory={type:row.dataset.sortType,id:row.dataset.sortId};row.classList.add("dragging");}});
+document.addEventListener("dragend",event=>{event.target.closest("[data-sort-id]")?.classList.remove("dragging");draggedCategory=null;});
+document.addEventListener("dragover",event=>{if(event.target.closest("[data-sort-id]"))event.preventDefault();});
+document.addEventListener("drop",event=>{const row=event.target.closest("[data-sort-id]");if(row&&draggedCategory){event.preventDefault();reorderByDrop(draggedCategory.type,draggedCategory.id,row.dataset.sortId);}});
+
 $("#search").addEventListener("input",event=>{state.query=event.target.value;render();});
 $("#filter").addEventListener("change",event=>{state.filter=event.target.value;render();});
-$("#add-record").addEventListener("click",()=>{const record=blankRecord(state.db);data[state.db].push(record);state.creating={db:state.db,id:record.id};render();openRecord(state.db,record.id);});
-$("#reset-data").addEventListener("click",()=>{if(confirm("恢复全部初始模拟数据？当前会话中的修改将丢失。")){data=structuredClone(initialData);state.selected=null;render();toast("已恢复初始数据");}});
+$("#column-count").addEventListener("change",event=>{preferences.columns=Number(event.target.value);savePreferences();render();});
+$("#add-major").addEventListener("click",()=>addCategory("major"));
+$("#add-sub").addEventListener("click",()=>addCategory("sub"));
+$("#manage-categories").addEventListener("click",openCategoryManager);
+$("#add-record").addEventListener("click",()=>{if(state.db==="purchases"&&(!state.selectedMajorId||!state.selectedSubId)){toast("请先选择或新建大分类和小分类");return;}const record=blankRecord(state.db);data[state.db].push(record);state.creating={db:state.db,id:record.id};render();openRecord(state.db,record.id);});
+$("#reset-data").addEventListener("click",()=>{if(confirm("恢复 v0.2 初始模拟数据？本地当前内容将被替换，并进入待同步演示队列。")){data=structuredClone(initialData);categories=structuredClone(initialCategories);state.selectedMajorId="m1";state.selectedSubId="c1";queueChange("reset","local-reset");render();toast("已恢复初始模拟数据");}});
 $("#record-form").addEventListener("submit",event=>{event.preventDefault();saveEditing();});
 $$(".close-dialog").forEach(button=>button.addEventListener("click",closeRecord));
 $("#delete-record").addEventListener("click",deleteEditing);
@@ -231,8 +196,18 @@ $("#paste-grid").addEventListener("click",openPaste);
 $$(".close-paste").forEach(button=>button.addEventListener("click",()=>$("#paste-dialog").close()));
 $("#paste-form").addEventListener("submit",event=>{event.preventDefault();applyPaste();});
 $("#paste-input").addEventListener("input",event=>{const rows=event.target.value.replace(/\r/g,"").split("\n").filter(Boolean);$("#paste-preview").textContent=rows.length?`检测到 ${rows.length} 行，最多 ${Math.max(...rows.map(row=>row.split("\t").length))} 列。`:"";});
-$("#desktop-table").addEventListener("keydown",event=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="c"&&state.selected){const record=getRecord(state.db,state.selected.id),field=getSchema().find(f=>f.key===state.selected.key);copyText(displayValue(state.db,record,field));event.preventDefault();}if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="v"){openPaste();event.preventDefault();}});
+$("#desktop-table").addEventListener("keydown",event=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="c"&&state.selected){const record=getRecord(state.db,state.selected.id),field=getSchema().find(item=>item.key===state.selected.key);copyText(displayValue(state.db,record,field));event.preventDefault();}if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="v"){openPaste();event.preventDefault();}});
+$("#desktop-table").addEventListener("dblclick",event=>{const row=event.target.closest("tr[data-id]");if(row)openRecord(state.db,row.dataset.id);});
 $("#record-dialog").addEventListener("cancel",event=>{event.preventDefault();closeRecord();});
+$$(".close-category").forEach(button=>button.addEventListener("click",()=>$("#category-dialog").close()));
+$("#preview-batch").addEventListener("click",previewBatch);
+$$(".close-batch").forEach(button=>button.addEventListener("click",()=>$("#batch-dialog").close()));
+$("#confirm-batch").addEventListener("click",confirmBatch);
 
-if("serviceWorker" in navigator) window.addEventListener("load",()=>navigator.serviceWorker.register("./sw.js").catch(error=>console.warn("Service Worker 注册失败",error)));
-render();
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="hidden")commitPendingChanges();else dataAdapter.flush();});
+window.addEventListener("online",()=>dataAdapter.flush());
+if("serviceWorker"in navigator)window.addEventListener("load",()=>navigator.serviceWorker.register("./sw.js").catch(()=>setSyncState("离线缓存注册失败 · 请人工检查")));
+
+function restorePhotoUrls(){data.purchases.forEach(record=>(record.photos||[]).forEach(photo=>{if(photo.blob)photo.url=URL.createObjectURL(photo.blob);}));}
+async function initialize(){try{await dataAdapter.open();const saved=await dataAdapter.load();if(saved?.data&&saved?.categories){data=saved.data;categories=saved.categories;restorePhotoUrls();}await dataAdapter.flush();}catch{setSyncState("IndexedDB 不可用 · 当前会话内暂存");}render();}
+initialize();

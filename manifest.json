@@ -1,7 +1,7 @@
 {
-  "name": "记录台 · Notion PWA 模拟原型",
+  "name": "记录台 · 分类照片 PWA",
   "short_name": "记录台",
-  "description": "用于验证移动端与桌面端多字段记录操作的离线 PWA 原型。",
+  "description": "分类、照片与多字段记录操作的本地暂存 PWA 原型。",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
