@@ -1,213 +1,493 @@
-"use strict";
+import { APP_SCHEMA, DEFAULT_DISPLAY_PREFERENCES, ENTITY, ITEM_DISPLAY_FIELDS, createLocalRecord } from "./schema.js";
+import { localDb } from "./storage.js";
+import { credentials } from "./credentials.js";
+import { notionApi, NotionApiError } from "./notion-api.js";
+import { syncCoordinator, wouldCreateSourceCycle } from "./sync.js";
+import { qrSvg } from "./qr.js";
 
-const purchaseSchema = [
-  { key:"name", label:"商品名称", type:"text", group:"常用字段" },
-  { key:"majorCategoryId", label:"大分类", type:"category-major", group:"分类", required:true },
-  { key:"subCategoryId", label:"小分类", type:"category-sub", group:"分类", required:true },
-  { key:"photos", label:"照片", type:"photos", group:"照片", full:true },
-  { key:"code", label:"商品编码", type:"text", group:"常用字段" },
-  { key:"quantity", label:"数量", type:"number", min:0, group:"常用字段" },
-  { key:"unitPrice", label:"采购单价", type:"number", step:"0.01", min:0, group:"价格与日期" },
-  { key:"currency", label:"币种", type:"select", options:["JPY","CNY","USD","EUR"], group:"价格与日期" },
-  { key:"exchangeRate", label:"汇率（兑日元）", type:"number", step:"0.0001", min:0, group:"价格与日期" },
-  { key:"discount", label:"折扣（%）", type:"number", step:"1", min:0, max:100, group:"价格与日期" },
-  { key:"purchaseDate", label:"采购日期", type:"date", group:"价格与日期" },
-  { key:"store", label:"店铺", type:"text", group:"来源资料" },
-  { key:"url", label:"商品网址", type:"url", group:"来源资料" },
-  { key:"status", label:"状态", type:"select", options:["待采购","已采购","已入库","部分售出","已售罄"], group:"常用字段" },
-  { key:"notes", label:"备注", type:"textarea", group:"来源资料", full:true },
-  { key:"totalCost", label:"采购总额（日元）", type:"formula", group:"计算与关联" },
-  { key:"saleIds", label:"关联售出记录", type:"relation", target:"sales", group:"计算与关联", full:true }
-];
+const $ = selector => document.querySelector(selector);
+const $$ = selector => [...document.querySelectorAll(selector)];
+const photoUrls = new Map();
 
-const saleSchema = [
-  { key:"customer", label:"顾客", type:"text", group:"售出信息", required:true },
-  { key:"purchaseIds", label:"关联商品", type:"relation", target:"purchases", group:"售出信息", full:true },
-  { key:"quantity", label:"数量", type:"number", min:0, group:"售出信息" },
-  { key:"salePrice", label:"售价（日元）", type:"number", step:"1", min:0, group:"价格与日期" },
-  { key:"shipping", label:"运费（日元）", type:"number", step:"1", min:0, group:"价格与日期" },
-  { key:"saleDate", label:"出售日期", type:"date", group:"价格与日期" },
-  { key:"netIncome", label:"净收入（日元）", type:"formula", group:"价格与日期" }
-];
+const state = {
+  connection: null,
+  workspace: { majorCategories: [], subCategories: [], items: [], pairings: [], photos: [] },
+  entity: ENTITY.ITEM,
+  selectedMajorId: null,
+  selectedSubId: null,
+  query: "",
+  editingId: null,
+  photoDraft: [],
+  refreshDraft: null,
+  pendingCredentialAction: null,
+  preferences: loadPreferences()
+};
 
-function mockPhoto(id,label,color,date) {
-  const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="480" height="480"><rect width="480" height="480" fill="${color}"/><circle cx="390" cy="85" r="100" fill="rgba(255,255,255,.16)"/><text x="36" y="410" fill="white" font-size="42" font-family="sans-serif">${label}</text></svg>`;
-  return {id,name:`${label}.jpg`,url:`data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`,date,dateSource:"人工指定"};
+function loadPreferences() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("notion-pwa-v03-display") || "{}");
+    return { ...structuredClone(DEFAULT_DISPLAY_PREFERENCES), ...saved };
+  } catch { return structuredClone(DEFAULT_DISPLAY_PREFERENCES); }
 }
 
-const initialCategories={
-  major:[{id:"m1",name:"日常用品",sort:10},{id:"m2",name:"兴趣收藏",sort:20},{id:"m3",name:"数码设备",sort:30}],
-  sub:[{id:"c1",name:"文具",majorId:"m1",sort:10},{id:"c2",name:"家居",majorId:"m1",sort:20},{id:"c3",name:"复古小物",majorId:"m2",sort:10},{id:"c4",name:"音频",majorId:"m3",sort:10}]
-};
+function savePreferences() { localStorage.setItem("notion-pwa-v03-display", JSON.stringify(state.preferences)); }
+function escapeHtml(value) { return String(value ?? "").replace(/[&<>\"]/g, char => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '\"':"&quot;" }[char])); }
+function toast(message, delay = 2400) { const el = $("#toast"); el.textContent = message; el.classList.add("show"); clearTimeout(toast.timer); toast.timer = setTimeout(() => el.classList.remove("show"), delay); }
+function recordName(record) { return record?.name || "（未命名）"; }
+function entityList(entity = state.entity) { return state.workspace[entity] || []; }
+function byId(entity, id) { return state.workspace[entity].find(record => record.localId === id) || null; }
+function majorForSub(subId) { const sub = byId(ENTITY.SUB, subId); return sub ? byId(ENTITY.MAJOR, sub.majorLocalId) : null; }
+function categoryLabel(item) { const sub = byId(ENTITY.SUB, item.subLocalId); const major = sub ? byId(ENTITY.MAJOR, sub.majorLocalId) : null; return [major?.name, sub?.name].filter(Boolean).join(" › "); }
+function formatPrice(item) { return item.price == null || item.price === "" ? "" : `${Number(item.price).toLocaleString("zh-CN")} ${item.currency || ""}`.trim(); }
+function notionLink(item) { return item.notionPageId ? `https://www.notion.so/${item.notionPageId.replace(/-/g, "")}` : ""; }
 
-const initialData={
-  purchases:[
-    {id:"p1",name:"黄铜自动铅笔",majorCategoryId:"m1",subCategoryId:"c1",photos:[mockPhoto("ph1","黄铜笔","#8c7044","2026-09-18")],primaryPhotoId:"",code:"ST-104",quantity:4,unitPrice:120,currency:"CNY",exchangeRate:20.6,discount:10,purchaseDate:"2026-09-18",store:"拾光文具",url:"https://example.com/pencil",status:"部分售出",notes:"虚构样品：雾面黄铜笔身",saleIds:["s1","s3"]},
-    {id:"p2",name:"折叠桌面灯",majorCategoryId:"m1",subCategoryId:"c2",photos:[mockPhoto("ph2","桌面灯","#ca9d58","2026-09-24"),mockPhoto("ph3","灯光细节","#6f747a","2026-09-22")],primaryPhotoId:"",code:"HM-208",quantity:2,unitPrice:4200,currency:"JPY",exchangeRate:1,discount:0,purchaseDate:"2026-09-24",store:"北町生活馆",url:"https://example.com/lamp",status:"已入库",notes:"虚构样品：暖白光三档",saleIds:[]},
-    {id:"p3",name:"复古蓝牙音箱",majorCategoryId:"m3",subCategoryId:"c4",photos:[mockPhoto("ph4","蓝牙音箱","#637b89","2026-10-02")],primaryPhotoId:"ph4",code:"DG-077",quantity:3,unitPrice:38,currency:"USD",exchangeRate:148.2,discount:5,purchaseDate:"2026-10-02",store:"Cloud Audio",url:"https://example.com/speaker",status:"部分售出",notes:"虚构样品：蓝灰配色",saleIds:["s2"]},
-    {id:"p4",name:"",majorCategoryId:"m2",subCategoryId:"c3",photos:[],primaryPhotoId:"",code:"HM-311",quantity:8,unitPrice:36,currency:"CNY",exchangeRate:20.6,discount:0,purchaseDate:"2026-10-11",store:"木棉杂货",url:"",status:"待采购",notes:"无名称、无照片记录的浏览示例",saleIds:[]}
-  ],
-  sales:[
-    {id:"s1",customer:"佐藤葵（示例）",purchaseIds:["p1"],quantity:1,salePrice:4200,shipping:210,saleDate:"2026-10-08"},
-    {id:"s2",customer:"林晓（示例）",purchaseIds:["p3"],quantity:1,salePrice:9200,shipping:520,saleDate:"2026-10-14"},
-    {id:"s3",customer:"田中悠（示例）",purchaseIds:["p1","p3"],quantity:2,salePrice:7600,shipping:350,saleDate:"2026-10-19"}
-  ]
-};
+function photoUrl(photo) {
+  if (!photo) return "";
+  if (photo.blob) {
+    if (!photoUrls.has(photo.localId)) photoUrls.set(photo.localId, URL.createObjectURL(photo.blob));
+    return photoUrls.get(photo.localId);
+  }
+  return photo.remoteUrl || photo.externalUrl || "";
+}
 
-const databaseMeta={
-  purchases:{title:"采购清单",schema:purchaseSchema,relationKey:"saleIds",target:"sales",primary:"name",subtitle:"分类、照片、来源、价格与售出关联"},
-  sales:{title:"售出记录",schema:saleSchema,relationKey:"purchaseIds",target:"purchases",primary:"customer",subtitle:"顾客、商品、售价与净收入"}
-};
+function itemPhotos(item) {
+  return (item.photoIds || []).map(id => state.workspace.photos.find(photo => photo.localId === id)).filter(Boolean).sort((a,b) => a.order - b.order);
+}
 
-let data=structuredClone(initialData);
-let categories=structuredClone(initialCategories);
-let state={db:"purchases",query:"",filter:"all",selected:null,editing:null,history:[],creating:null,selectedMajorId:"m1",selectedSubId:"c1",photoDraft:[],primaryPhotoDraft:"",batchDraft:null};
-let idCounter=200;
-const $=selector=>document.querySelector(selector);
-const $$=selector=>[...document.querySelectorAll(selector)];
-const preferences=loadPreferences();
+function displayValue(item, key) {
+  if (key === "category") return categoryLabel(item);
+  if (key === "price") return formatPrice(item);
+  if (key === "notionUniqueId") return item.notionUniqueId || "本地待编号";
+  return item[key] ?? "";
+}
 
-function loadPreferences(){try{return {...{layout:"category",columns:4,modules:["category","recent","unlinked"]},...JSON.parse(localStorage.getItem("notion-pwa-v02-preferences")||"{}")};}catch{return {layout:"category",columns:4,modules:["category","recent","unlinked"]};}}
-function savePreferences(){localStorage.setItem("notion-pwa-v02-preferences",JSON.stringify(preferences));}
+function setBanner(kind, message) {
+  const banner = $("#connection-banner");
+  banner.classList.toggle("warning", kind === "warning");
+  banner.classList.toggle("error", kind === "error");
+  $("#connection-label").textContent = state.connection ? "已配置 PWA Database" : "本设备未连接";
+  $("#sync-state").textContent = message;
+}
 
-const dataAdapter={
-  mode:"mock",db:null,
-  async open(){if(!("indexedDB" in window))return null;return new Promise((resolve,reject)=>{const request=indexedDB.open("notion-pwa-v02",1);request.onupgradeneeded=()=>{const db=request.result;if(!db.objectStoreNames.contains("state"))db.createObjectStore("state");if(!db.objectStoreNames.contains("pending"))db.createObjectStore("pending",{keyPath:"id"});};request.onsuccess=()=>{this.db=request.result;resolve(this.db);};request.onerror=()=>reject(request.error);});},
-  async load(){if(!this.db)return null;return new Promise(resolve=>{const request=this.db.transaction("state").objectStore("state").get("current");request.onsuccess=()=>resolve(request.result||null);request.onerror=()=>resolve(null);});},
-  save(snapshot){if(this.db)this.db.transaction("state","readwrite").objectStore("state").put(snapshot,"current");},
-  enqueue(change){if(this.db)this.db.transaction("pending","readwrite").objectStore("pending").put({...change,id:change.key,queuedAt:new Date().toISOString(),baseVersion:change.baseVersion||0});},
-  pendingCount(){if(!this.db)return Promise.resolve(0);return new Promise(resolve=>{const request=this.db.transaction("pending").objectStore("pending").count();request.onsuccess=()=>resolve(request.result);request.onerror=()=>resolve(0);});},
-  async flush(){const count=await this.pendingCount();setSyncState(count?`${count} 项本地待同步 · 未连接 Notion`:"本地已暂存 · 未连接 Notion");return {status:"offline-demo",count};}
-};
+async function reloadWorkspace() {
+  state.workspace = await localDb.loadWorkspace();
+  normalizeSelection();
+  render();
+}
 
-const pendingChanges=new Map();
-let commitTimer=null;
-function queueChange(key,type,payload={}){pendingChanges.set(key,{key,type,payload});setSyncState("变更待写入本地队列");clearTimeout(commitTimer);commitTimer=setTimeout(commitPendingChanges,1000);}
-function commitPendingChanges(){clearTimeout(commitTimer);commitTimer=null;pendingChanges.forEach(change=>dataAdapter.enqueue(change));pendingChanges.clear();dataAdapter.save({data,categories,savedAt:new Date().toISOString(),localVersion:Date.now()});dataAdapter.flush();}
-function setSyncState(message){const element=$("#sync-state");if(element)element.textContent=message;}
+function normalizeSelection() {
+  const majors = [...state.workspace.majorCategories].sort((a,b) => a.sort-b.sort);
+  if (!majors.some(record => record.localId === state.selectedMajorId)) state.selectedMajorId = majors[0]?.localId || null;
+  const subs = state.workspace.subCategories.filter(record => record.majorLocalId === state.selectedMajorId).sort((a,b) => a.sort-b.sort);
+  if (!subs.some(record => record.localId === state.selectedSubId)) state.selectedSubId = subs[0]?.localId || null;
+}
 
-function getSchema(db=state.db){return databaseMeta[db].schema;}
-function getRecord(db,id){return data[db].find(record=>record.id===id);}
-function sortedMajors(){return [...categories.major].sort((a,b)=>a.sort-b.sort);}
-function sortedSubs(majorId){return categories.sub.filter(item=>item.majorId===majorId).sort((a,b)=>a.sort-b.sort);}
-function categoryName(id,type){return categories[type].find(item=>item.id===id)?.name||"";}
-function normalizedName(value){return value.trim().toLocaleLowerCase("zh-CN");}
-function isUniqueCategoryName(name,ignoreId=""){const wanted=normalizedName(name);return wanted&&![...categories.major,...categories.sub].some(item=>item.id!==ignoreId&&normalizedName(item.name)===wanted);}
-function recordLabel(record,db="purchases"){return record[databaseMeta[db].primary]||"（未命名记录）";}
-function formula(db,record,key){if(db==="purchases"&&key==="totalCost")return Math.round((+record.quantity||0)*(+record.unitPrice||0)*(+record.exchangeRate||0)*(1-(+record.discount||0)/100));if(db==="sales"&&key==="netIncome")return(+record.salePrice||0)-(+record.shipping||0);return"";}
-function displayValue(db,record,field){if(!record)return"";if(field.type==="formula")return formula(db,record,field.key).toLocaleString("zh-CN");if(field.type==="relation")return(record[field.key]||[]).map(id=>recordLabel(getRecord(field.target,id)||{},field.target)).join("、");if(field.type==="category-major")return categoryName(record[field.key],"major");if(field.type==="category-sub")return categoryName(record[field.key],"sub");if(field.type==="photos")return`${(record.photos||[]).length} 张`;if(["unitPrice","salePrice","shipping"].includes(field.key))return(+record[field.key]||0).toLocaleString("zh-CN");return record[field.key]??"";}
-function escapeHtml(value){return String(value??"").replace(/[&<>\"]/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;",'\"':"&quot;"}[char]));}
-function toast(message){const element=$("#toast");element.textContent=message;element.classList.add("show");clearTimeout(toast.timer);toast.timer=setTimeout(()=>element.classList.remove("show"),1900);}
-async function copyText(text){try{await navigator.clipboard.writeText(String(text));toast("已复制到剪贴板");}catch{const area=document.createElement("textarea");area.value=String(text);document.body.append(area);area.select();document.execCommand("copy");area.remove();toast("已复制到剪贴板");}}
-function sortedPhotos(record){return[...(record.photos||[])].sort((a,b)=>{if(!a.date&&!b.date)return 0;if(!a.date)return 1;if(!b.date)return-1;return b.date.localeCompare(a.date);});}
-function primaryPhoto(record){const photos=record.photos||[];return photos.find(photo=>photo.id===record.primaryPhotoId)||sortedPhotos(record)[0]||null;}
+function filteredRecords() {
+  const query = state.query.toLocaleLowerCase("zh-CN");
+  return entityList().filter(record => {
+    if (state.entity === ENTITY.ITEM) {
+      const text = [record.name, record.notionUniqueId, categoryLabel(record), record.source, record.status, record.entryType].join(" ").toLocaleLowerCase("zh-CN");
+      return text.includes(query);
+    }
+    const mother = byId(ENTITY.ITEM, record.motherLocalId), father = byId(ENTITY.ITEM, record.fatherLocalId);
+    return [record.name, mother?.name, father?.name, record.pollinationDate].join(" ").toLocaleLowerCase("zh-CN").includes(query);
+  });
+}
 
-function filteredRecords(){const meta=databaseMeta[state.db];return data[state.db].filter(record=>{const haystack=getSchema().map(field=>displayValue(state.db,record,field)).join(" ").toLowerCase();let ok=haystack.includes(state.query.toLowerCase());if(state.filter==="linked")ok=ok&&(record[meta.relationKey]||[]).length>0;if(state.filter==="unlinked")ok=ok&&(record[meta.relationKey]||[]).length===0;if(state.filter.startsWith("value:")){const[,key,value]=state.filter.split(":");ok=ok&&String(record[key])===value;}return ok;});}
-function visibleColumns(db=state.db){const keys=db==="purchases"?["name","majorCategoryId","subCategoryId","photos","code","quantity","unitPrice","purchaseDate","status","totalCost","saleIds"]:["customer","purchaseIds","quantity","salePrice","shipping","saleDate","netIncome"];return keys.map(key=>databaseMeta[db].schema.find(field=>field.key===key));}
+function render() {
+  normalizeSelection();
+  $$(".entity-tab").forEach(button => button.classList.toggle("active", button.dataset.entity === state.entity));
+  $("#item-count").textContent = state.workspace.items.length;
+  $("#pairing-count").textContent = state.workspace.pairings.length;
+  $("#view-title").textContent = APP_SCHEMA[state.entity].title;
+  $("#category-browser").hidden = state.entity !== ENTITY.ITEM;
+  renderCategories(); renderPending(); renderViews();
+}
 
-function render(){const meta=databaseMeta[state.db],records=filteredRecords();$$(".tab").forEach(tab=>tab.classList.toggle("active",tab.dataset.db===state.db));$("#purchase-count").textContent=data.purchases.length;$("#sale-count").textContent=data.sales.length;$("#view-title").textContent=meta.title;$("#view-subtitle").textContent=meta.subtitle;const showHome=state.db==="purchases";$("#home-controls").hidden=!showHome;$("#category-browser").hidden=!showHome;renderFilter();renderCategoryBrowser();renderTable(records);renderMobileHome(records);$("#empty-state").hidden=records.length>0;}
-function renderFilter(){const select=$("#filter"),previous=state.filter;const options=[["all","全部记录"],["linked","已有跨表关联"],["unlinked","尚未关联"]];if(state.db==="purchases")options.push(...["待采购","已采购","已入库","部分售出","已售罄"].map(value=>[`value:status:${value}`,value]));select.innerHTML=options.map(([value,label])=>`<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join("");select.value=[...select.options].some(option=>option.value===previous)?previous:"all";state.filter=select.value;}
-function renderCategoryBrowser(){if(state.db!=="purchases")return;const majors=sortedMajors();if(!majors.some(item=>item.id===state.selectedMajorId))state.selectedMajorId=majors[0]?.id||"";const subs=sortedSubs(state.selectedMajorId);if(!subs.some(item=>item.id===state.selectedSubId))state.selectedSubId=subs[0]?.id||"";$("#major-categories").innerHTML=majors.map(item=>`<button data-major="${item.id}" class="${item.id===state.selectedMajorId?'active':''}">${escapeHtml(item.name)}</button>`).join("");$("#sub-categories").innerHTML=subs.map(item=>`<button data-sub="${item.id}" class="${item.id===state.selectedSubId?'active':''}">${escapeHtml(item.name)}</button>`).join("")||'<span class="muted">暂无小分类</span>';$$("[data-layout]").forEach(button=>button.classList.toggle("active",button.dataset.layout===preferences.layout));$("#column-count").value=String(preferences.columns);}
-function renderTable(records){const columns=visibleColumns();$("#desktop-table").innerHTML=`<table><thead><tr>${columns.map(field=>`<th>${escapeHtml(field.label)}</th>`).join("")}<th class="row-actions">操作</th></tr></thead><tbody>${records.map(record=>`<tr data-id="${record.id}">${columns.map(field=>field.type==="relation"?`<td data-key="${field.key}">${relationButtons(record,field)}</td>`:`<td data-key="${field.key}" title="${escapeHtml(displayValue(state.db,record,field))}" class="${field.key===databaseMeta[state.db].primary?'name-cell ':''}${field.type==='number'||field.type==='formula'?'money':''}">${escapeHtml(displayValue(state.db,record,field))||'<span class="muted">—</span>'}</td>`).join("")}<td class="row-actions"><button data-edit="${record.id}">编辑</button></td></tr>`).join("")}</tbody></table>`;}
-function relationButtons(record,field){const ids=record[field.key]||[];if(!ids.length)return'<span class="muted">未关联</span>';return ids.map(id=>`<button class="relation-chip" data-jump-db="${field.target}" data-jump-id="${id}">${escapeHtml(recordLabel(getRecord(field.target,id)||{},field.target))}</button>`).join("");}
-function thumbnailGrid(records){return`<div class="thumb-grid" style="--grid-columns:${Number(preferences.columns)||4}">${records.map(record=>{const photo=primaryPhoto(record);return`<button class="thumb-card" data-edit="${record.id}"><span class="thumb-image">${photo?`<img src="${escapeHtml(photo.url||"")}" alt="">`:'<span class="thumb-placeholder">◇</span>'}${(record.photos||[]).length>1?`<span class="photo-count">${record.photos.length}</span>`:""}</span><strong>${escapeHtml(recordLabel(record))}</strong></button>`;}).join("")}</div>`;}
-function renderMobileHome(records){if(state.db!=="purchases"){$("#mobile-home").innerHTML=records.map(record=>`<article class="record-card"><div class="card-top"><h3>${escapeHtml(recordLabel(record,"sales"))}</h3><button data-edit="${record.id}">编辑</button></div><div class="card-relations">${relationButtons(record,saleSchema[1])}</div></article>`).join("");return;}if(preferences.layout==="gallery"){$("#mobile-home").innerHTML=thumbnailGrid(records);return;}if(preferences.layout==="category"){const scoped=records.filter(record=>record.subCategoryId===state.selectedSubId);$("#mobile-home").innerHTML=scoped.length?thumbnailGrid(scoped):'<div class="empty">该小分类暂无记录。</div>';return;}const modules={category:{title:"当前小分类",records:records.filter(record=>record.subCategoryId===state.selectedSubId)},recent:{title:"最近采购",records:[...records].sort((a,b)=>(b.purchaseDate||"").localeCompare(a.purchaseDate||"")).slice(0,8)},unlinked:{title:"尚未关联售出",records:records.filter(record=>!(record.saleIds||[]).length).slice(0,8)}},allIds=["category","recent","unlinked"];const config=`<div class="custom-config"><span>显示模块：</span>${allIds.map(id=>`<button data-module-toggle="${id}" class="${preferences.modules.includes(id)?'active':''}">${modules[id].title}</button>`).join("")}</div>`;$("#mobile-home").innerHTML=config+(preferences.modules.length?preferences.modules.map((id,index)=>`<section class="custom-module"><div class="custom-module-head"><h3>${modules[id].title}</h3><span><button data-module-move="${id}" data-direction="-1" ${index===0?'disabled':''}>↑</button><button data-module-move="${id}" data-direction="1" ${index===preferences.modules.length-1?'disabled':''}>↓</button></span></div>${modules[id].records.length?thumbnailGrid(modules[id].records):'<span class="muted">暂无记录</span>'}</section>`).join(""):'<div class="empty">请选择至少一个首页模块。</div>');}
+function renderCategories() {
+  if (state.entity !== ENTITY.ITEM) return;
+  const majors = [...state.workspace.majorCategories].sort((a,b) => a.sort-b.sort);
+  $("#major-categories").innerHTML = majors.map(record => `<button data-major="${record.localId}" class="${record.localId===state.selectedMajorId?'active':''}">${escapeHtml(recordName(record))}</button>`).join("") || '<span class="muted">请新增大分类</span>';
+  const subs = state.workspace.subCategories.filter(record => record.majorLocalId === state.selectedMajorId).sort((a,b) => a.sort-b.sort);
+  $("#sub-categories").innerHTML = subs.map(record => `<button data-sub="${record.localId}" class="${record.localId===state.selectedSubId?'active':''}">${escapeHtml(recordName(record))}</button>`).join("") || '<span class="muted">请新增小分类</span>';
+}
 
-function blankRecord(db){const record={id:(db==="purchases"?"p":"s")+(++idCounter)};getSchema(db).forEach(field=>{if(field.type==="relation")record[field.key]=[];else if(field.type==="photos")record.photos=[];else if(field.type==="number")record[field.key]=0;else if(!["formula","category-major","category-sub"].includes(field.type))record[field.key]=field.options?.[0]||"";});if(db==="purchases"){record.majorCategoryId=state.selectedMajorId;record.subCategoryId=state.selectedSubId;record.primaryPhotoId="";record.currency="JPY";record.exchangeRate=1;record.status="待采购";}return record;}
-function openRecord(db,id,{pushHistory=false}={}){if(pushHistory&&state.editing)state.history.push({...state.editing});state.editing={db,id};const record=getRecord(db,id),meta=databaseMeta[db];if(!record)return;state.photoDraft=structuredClone(record.photos||[]);state.primaryPhotoDraft=record.primaryPhotoId||"";$("#dialog-db").textContent=meta.title;$("#dialog-title").textContent=recordLabel(record,db);$("#back-record").hidden=state.history.length===0;const groups=[...new Set(meta.schema.map(field=>field.group))];$("#form-fields").innerHTML=groups.map((group,index)=>`<details class="field-group" ${index<3?'open':''}><summary>${escapeHtml(group)}</summary><div class="field-grid">${meta.schema.filter(field=>field.group===group).map(field=>fieldControl(db,record,field)).join("")}</div></details>`).join("");const dialog=$("#record-dialog");if(!dialog.open)dialog.showModal();}
-function fieldControl(db,record,field){const value=record[field.key]??"",copy=`<button type="button" data-copy-field="${field.key}">复制</button>`;let control="";if(field.type==="formula")control=`<output>${escapeHtml(displayValue(db,record,field))}</output>`;else if(field.type==="select")control=`<select name="${field.key}">${field.options.map(option=>`<option ${value===option?'selected':''}>${escapeHtml(option)}</option>`).join("")}</select>`;else if(field.type==="textarea")control=`<textarea name="${field.key}" rows="3">${escapeHtml(value)}</textarea>`;else if(field.type==="relation")return`<div class="field full"><span class="field-label"><span>${escapeHtml(field.label)}</span>${copy}</span><div class="relation-options">${data[field.target].map(target=>`<div class="relation-option"><label><input type="checkbox" name="${field.key}" value="${target.id}" ${(value||[]).includes(target.id)?'checked':''}><span>${escapeHtml(recordLabel(target,field.target))}</span></label><button type="button" data-jump-db="${field.target}" data-jump-id="${target.id}" title="请先保存当前修改">打开原记录</button></div>`).join("")||'<span class="muted">目标数据库暂无记录</span>'}</div></div>`;else if(field.type==="category-major")control=`<div class="category-pair"><select name="majorCategoryId" required>${sortedMajors().map(item=>`<option value="${item.id}" ${value===item.id?'selected':''}>${escapeHtml(item.name)}</option>`).join("")}</select><button type="button" data-inline-category="major">＋ 就地新建</button></div>`;else if(field.type==="category-sub")control=categorySubControl(value,record.majorCategoryId);else if(field.type==="photos")return`<div class="field full"><span class="field-label"><span>照片与首图</span><span>${state.photoDraft.length} 张</span></span>${photoEditor()}</div>`;else control=`<input name="${field.key}" type="${field.type}" value="${escapeHtml(value)}" ${field.required?'required':''} ${field.min!==undefined?`min="${field.min}"`:''} ${field.max!==undefined?`max="${field.max}"`:''} ${field.step?`step="${field.step}"`:''}>`;return`<label class="field ${field.full?'full':''}"><span class="field-label"><span>${escapeHtml(field.label)}</span>${copy}</span>${control}</label>`;}
-function categorySubControl(value,majorId){return`<div class="category-pair"><select name="subCategoryId" required>${sortedSubs(majorId).map(item=>`<option value="${item.id}" ${value===item.id?'selected':''}>${escapeHtml(item.name)}</option>`).join("")}</select><button type="button" data-inline-category="sub">＋ 就地新建</button></div>`;}
-function photoEditor(){const pseudo={photos:state.photoDraft,primaryPhotoId:state.primaryPhotoDraft};return`<div class="photo-editor"><label class="photo-upload"><input id="photo-input" type="file" accept="image/*,.heic,.heif" capture="environment" multiple>拍摄或选择多张照片</label><p class="photo-note">日期顺序：照片拍摄时间 → 文件时间 → 未知。不会把本次上传时间当作原始日期；HEIC 兼容性需在手机人工验证。</p><div class="photo-list">${sortedPhotos(pseudo).map(photo=>`<div class="photo-item" data-photo-id="${photo.id}"><img src="${escapeHtml(photo.url||"")}" alt=""><div class="photo-info"><strong>${escapeHtml(photo.name)}</strong><small class="${photo.date?'':'unknown-date'}">${photo.date?`${photo.date} · ${photo.dateSource}`:'日期未知 · 请人工指定'}</small><input type="date" data-photo-date="${photo.id}" value="${escapeHtml(photo.date||"")}" aria-label="人工指定照片日期"></div><div class="photo-actions"><button type="button" data-photo-primary="${photo.id}">${primaryPhoto(pseudo)?.id===photo.id?'✓ 首图':'设为首图'}</button><button type="button" data-photo-delete="${photo.id}" class="danger">删除</button></div></div>`).join("")||'<span class="muted">暂无照片；记录仍可保存和打开。</span>'}</div></div>`;}
-function refreshPhotoEditor(){const container=$(".photo-editor");if(container)container.outerHTML=photoEditor();}
+function renderPending() {
+  const records = [...state.workspace.majorCategories, ...state.workspace.subCategories, ...state.workspace.items, ...state.workspace.pairings];
+  const pending = records.filter(record => record.pending).length;
+  const errors = records.filter(record => record.uploadError).length;
+  $("#pending-summary").textContent = pending ? `${pending} 条待上传${errors ? ` · ${errors} 条失败` : ""}` : "无待上传变化";
+}
 
-function readForm(db,base){const form=$("#record-form"),result={...base};getSchema(db).forEach(field=>{if(field.type==="formula")return;if(field.type==="photos"){result.photos=state.photoDraft;result.primaryPhotoId=state.photoDraft.some(photo=>photo.id===state.primaryPhotoDraft)?state.primaryPhotoDraft:"";return;}if(field.type==="relation")result[field.key]=[...form.querySelectorAll(`[name="${field.key}"]:checked`)].map(input=>input.value);else{const input=form.elements[field.key];result[field.key]=field.type==="number"?Number(input.value||0):input.value.trim();}});return result;}
-function syncRelations(db,id,newIds){const meta=databaseMeta[db],reverse=databaseMeta[meta.target].relationKey;data[meta.target].forEach(target=>{target[reverse]=(target[reverse]||[]).filter(linked=>linked!==id);});newIds.forEach(targetId=>{const target=getRecord(meta.target,targetId);if(target&&!target[reverse].includes(id))target[reverse].push(id);});}
-function saveEditing(){const{db,id}=state.editing,index=data[db].findIndex(record=>record.id===id);if(index<0)return;const updated=readForm(db,data[db][index]);if(db==="purchases"&&!sortedSubs(updated.majorCategoryId).some(item=>item.id===updated.subCategoryId)){toast("请选择该大分类所属的小分类");return;}data[db][index]=updated;syncRelations(db,id,updated[databaseMeta[db].relationKey]||[]);state.creating=null;queueChange(`record:${db}:${id}`,"record-update",{db,id});render();closeRecord();toast("修改已在本机暂存");}
-function closeRecord(){if(state.creating&&state.editing?.id===state.creating.id){data[state.creating.db]=data[state.creating.db].filter(record=>record.id!==state.creating.id);state.creating=null;render();}$("#record-dialog").close();state.editing=null;state.history=[];state.photoDraft=[];}
-function deleteEditing(){const{db,id}=state.editing,record=getRecord(db,id);if(!record||!confirm(`删除“${recordLabel(record,db)}”？关联记录会同步解除。`))return;syncRelations(db,id,[]);data[db]=data[db].filter(item=>item.id!==id);state.creating=null;queueChange(`record:${db}:${id}`,"record-delete",{db,id});closeRecord();render();toast("记录已从本地暂存中删除");}
-function recordAsText(db,record){return getSchema(db).map(field=>`${field.label}: ${displayValue(db,record,field)}`).join("\n");}
+function itemCard(item, compact = false) {
+  const photo = itemPhotos(item)[0];
+  const visible = state.preferences.fieldOrder.filter(key => state.preferences.fields.includes(key));
+  return `<button class="data-card" data-open-record="${item.localId}"><span class="data-card-image">${photo?`<img src="${escapeHtml(photoUrl(photo))}" alt="">`:'◇'}</span><span class="data-card-body">${visible.map((key,index) => index===0?`<strong>${escapeHtml(displayValue(item,key)||"—")}</strong>`:`<span>${escapeHtml(displayValue(item,key)||"—")}</span>`).join("")}${item.pending?'<span>● 待上传</span>':''}</span></button>`;
+}
 
-async function photoDateFromFile(file){try{if(/jpe?g/i.test(file.type)||/\.jpe?g$/i.test(file.name)){const date=await readExifDate(file);if(date)return{date,source:"拍摄时间"};}}catch{}if(file.lastModified>0){const date=new Date(file.lastModified);if(!Number.isNaN(date.getTime()))return{date:date.toISOString().slice(0,10),source:"文件时间"};}return{date:"",source:"未知"};}
-async function readExifDate(file){const view=new DataView(await file.arrayBuffer());if(view.byteLength<4||view.getUint16(0)!==0xffd8)return"";let offset=2;while(offset+4<view.byteLength){if(view.getUint8(offset)!==0xff)break;const marker=view.getUint8(offset+1),length=view.getUint16(offset+2);if(marker===0xe1&&length>8&&view.getUint32(offset+4)===0x45786966){const tiff=offset+10,little=view.getUint16(tiff)===0x4949,get16=position=>view.getUint16(position,little),get32=position=>view.getUint32(position,little);const ifd=tiff+get32(tiff+4),count=get16(ifd);let exifOffset=0;for(let index=0;index<count;index++){const entry=ifd+2+index*12;if(get16(entry)===0x8769)exifOffset=tiff+get32(entry+8);}if(exifOffset){const exifCount=get16(exifOffset);for(let index=0;index<exifCount;index++){const entry=exifOffset+2+index*12;if(get16(entry)===0x9003){const pointer=tiff+get32(entry+8);let raw="";for(let cursor=0;cursor<19&&pointer+cursor<view.byteLength;cursor++)raw+=String.fromCharCode(view.getUint8(pointer+cursor));const match=raw.match(/(\d{4}):(\d{2}):(\d{2})/);if(match)return`${match[1]}-${match[2]}-${match[3]}`;}}}}offset+=2+length;}return"";}
-async function addPhotoFiles(files){for(const file of files){const info=await photoDateFromFile(file);state.photoDraft.push({id:`photo-${Date.now()}-${++idCounter}`,name:file.name,url:URL.createObjectURL(file),blob:file,date:info.date,dateSource:info.source});}refreshPhotoEditor();toast(`已加入 ${files.length} 张照片；保存记录后暂存`);}
+function pairingCard(record) {
+  const mother = byId(ENTITY.ITEM, record.motherLocalId), father = byId(ENTITY.ITEM, record.fatherLocalId);
+  return `<button class="data-card" data-open-record="${record.localId}"><span class="data-card-image">×</span><span class="data-card-body"><strong>${escapeHtml(recordName(record))}</strong><span>${escapeHtml(recordName(mother))} × ${escapeHtml(recordName(father))}</span><span>${escapeHtml(record.pollinationDate||"日期未填")}</span></span></button>`;
+}
 
-function parseCell(field,value){if(field.type==="number"){const parsed=Number(String(value).replace(/[,，￥¥$€%\s]/g,""));return Number.isFinite(parsed)?parsed:0;}if(field.type==="select")return field.options.includes(value)?value:(value||field.options[0]);return value;}
-function openPaste(){const columns=visibleColumns().filter(field=>!["relation","formula","photos","category-major","category-sub"].includes(field.type));const startIndex=state.selected?Math.max(0,columns.findIndex(field=>field.key===state.selected.key)):0;$("#paste-help").textContent=`从“${columns[startIndex].label}”列开始，依次对应：${columns.slice(startIndex).map(field=>field.label).join(" → ")}。新增行使用当前所选分类；分类、照片、公式和关联请在编辑窗口维护。`;$("#paste-input").value="";$("#paste-preview").textContent="";$("#paste-dialog").showModal();setTimeout(()=>$("#paste-input").focus(),50);}
-function applyPaste(){const rows=$("#paste-input").value.replace(/\r/g,"").split("\n").filter(line=>line.length).map(line=>line.split("\t"));if(!rows.length)return toast("没有可应用的数据");const columns=visibleColumns().filter(field=>!["relation","formula","photos","category-major","category-sub"].includes(field.type));const startCol=state.selected?Math.max(0,columns.findIndex(field=>field.key===state.selected.key)):0,startRow=state.selected?Math.max(0,data[state.db].findIndex(record=>record.id===state.selected.id)):data[state.db].length;rows.forEach((cells,rowOffset)=>{let record=data[state.db][startRow+rowOffset];if(!record){record=blankRecord(state.db);data[state.db].push(record);}cells.forEach((value,colOffset)=>{const field=columns[startCol+colOffset];if(field)record[field.key]=parseCell(field,value.trim());});});queueChange(`paste:${state.db}`,"grid-paste",{rows:rows.length});$("#paste-dialog").close();render();toast(`已应用 ${rows.length} 行数据`);}
+function renderViews() {
+  const records = filteredRecords();
+  const table = $("#desktop-table"), cards = $("#desktop-cards"), mobile = $("#mobile-grid");
+  table.classList.toggle("hidden", state.preferences.desktopView !== "table");
+  cards.classList.toggle("active", state.preferences.desktopView === "cards");
+  $$("[data-desktop-view]").forEach(button => button.classList.toggle("active", button.dataset.desktopView === state.preferences.desktopView));
+  cards.style.setProperty("--desktop-columns", state.preferences.desktopColumns);
+  mobile.style.setProperty("--mobile-columns", state.preferences.mobileColumns);
+  if (state.entity === ENTITY.ITEM) {
+    table.innerHTML = renderItemTable(records);
+    cards.innerHTML = records.map(record => itemCard(record)).join("");
+    const scoped = state.selectedSubId ? records.filter(record => record.subLocalId === state.selectedSubId) : records;
+    mobile.innerHTML = scoped.map(record => itemCard(record,true)).join("");
+  } else {
+    table.innerHTML = renderPairingTable(records);
+    cards.innerHTML = records.map(pairingCard).join("");
+    mobile.innerHTML = records.map(pairingCard).join("");
+  }
+  $("#empty-state").hidden = records.length > 0;
+}
 
-function addCategory(type,majorId=state.selectedMajorId){const label=type==="major"?"大分类":"小分类",name=prompt(`输入新${label}名称：`);if(name===null)return"";if(!isUniqueCategoryName(name)){toast("分类名称必须全局唯一且不能为空");return"";}const list=type==="major"?categories.major:categories.sub,id=`${type==="major"?'m':'c'}${Date.now()}`;const item={id,name:name.trim(),sort:Math.max(0,...list.filter(entry=>type==="major"||entry.majorId===majorId).map(entry=>entry.sort))+10};if(type==="sub")item.majorId=majorId;list.push(item);if(type==="major"){state.selectedMajorId=id;state.selectedSubId="";}else state.selectedSubId=id;queueChange(`category:${type}:${id}`,"category-create",item);render();if($("#category-dialog").open)renderCategoryManager();requestAnimationFrame(()=>$(type==="major"?"#major-categories":"#sub-categories")?.lastElementChild?.scrollIntoView({behavior:"smooth",inline:"end"}));return id;}
-function renameCategory(type,id,name){const item=categories[type].find(entry=>entry.id===id);if(!item)return;if(!isUniqueCategoryName(name,id)){toast("分类名称必须全局唯一且不能为空");renderCategoryManager();return;}item.name=name.trim();queueChange(`category:${type}:${id}`,"category-rename",{id,name:item.name});render();renderCategoryManager();}
-function deleteCategory(type,id){let used=false;if(type==="major")used=categories.sub.some(item=>item.majorId===id)||data.purchases.some(record=>record.majorCategoryId===id);else used=data.purchases.some(record=>record.subCategoryId===id);if(used){toast("该分类仍有关联记录或下级分类，请先迁移");return;}categories[type]=categories[type].filter(item=>item.id!==id);queueChange(`category:${type}:${id}`,"category-delete",{id});render();renderCategoryManager();}
-function moveCategory(type,id,direction){const item=categories[type].find(entry=>entry.id===id);if(!item)return;const siblings=type==="major"?sortedMajors():sortedSubs(item.majorId),index=siblings.findIndex(entry=>entry.id===id),swap=siblings[index+direction];if(!swap)return;[item.sort,swap.sort]=[swap.sort,item.sort];const finalOrder=type==="major"?sortedMajors():sortedSubs(item.majorId);queueChange(`sort:${type}:${item.majorId||"root"}`,"category-sort",{order:finalOrder.map(entry=>entry.id)});render();renderCategoryManager();}
-function reorderByDrop(type,draggedId,targetId){const dragged=categories[type].find(item=>item.id===draggedId),target=categories[type].find(item=>item.id===targetId);if(!dragged||!target||(type==="sub"&&dragged.majorId!==target.majorId))return;const siblings=type==="major"?sortedMajors():sortedSubs(dragged.majorId),from=siblings.findIndex(item=>item.id===draggedId),to=siblings.findIndex(item=>item.id===targetId);siblings.splice(to,0,siblings.splice(from,1)[0]);siblings.forEach((item,index)=>item.sort=(index+1)*10);queueChange(`sort:${type}:${dragged.majorId||"root"}`,"category-sort",{order:siblings.map(item=>item.id)});render();renderCategoryManager();}
+function renderItemTable(records) {
+  return `<table><thead><tr><th>名称</th><th>正式编号</th><th>分类</th><th>入手日期</th><th>来源</th><th>价格</th><th>数量</th><th>状态</th><th>录入类型</th><th>同步</th><th class="row-actions">操作</th></tr></thead><tbody>${records.map(item => `<tr data-id="${item.localId}"><td class="name-cell">${escapeHtml(recordName(item))}</td><td>${escapeHtml(item.notionUniqueId||"—")}</td><td>${escapeHtml(categoryLabel(item)||"—")}</td><td>${escapeHtml(item.acquisitionDate||"—")}</td><td>${escapeHtml(item.source||"—")}</td><td>${escapeHtml(formatPrice(item)||"—")}</td><td>${escapeHtml(item.quantity??1)}</td><td>${escapeHtml(item.status||"—")}</td><td>${escapeHtml(item.entryType||"—")}</td><td>${item.pending?'待上传':'已同步'}</td><td class="row-actions"><button data-open-record="${item.localId}">编辑</button></td></tr>`).join("")}</tbody></table>`;
+}
+
+function renderPairingTable(records) {
+  return `<table><thead><tr><th>记录名称</th><th>母本</th><th>父本</th><th>授粉日期</th><th>结种／收种日期</th><th>子代</th><th>同步</th><th class="row-actions">操作</th></tr></thead><tbody>${records.map(record => `<tr><td>${escapeHtml(recordName(record))}</td><td>${escapeHtml(recordName(byId(ENTITY.ITEM,record.motherLocalId)))}</td><td>${escapeHtml(recordName(byId(ENTITY.ITEM,record.fatherLocalId)))}</td><td>${escapeHtml(record.pollinationDate||"—")}</td><td>${escapeHtml(record.harvestDate||"—")}</td><td>${escapeHtml((record.childLocalIds||[]).map(id=>recordName(byId(ENTITY.ITEM,id))).join("、")||"—")}</td><td>${record.pending?'待上传':'已同步'}</td><td class="row-actions"><button data-open-record="${record.localId}">编辑</button></td></tr>`).join("")}</tbody></table>`;
+}
+
+function openOnboarding(step = "token", options = {}) {
+  const dialog = $("#onboarding-dialog");
+  if (!dialog.open) dialog.showModal();
+  if (step === "token") renderTokenStep(options.update);
+  if (step === "unlock") renderUnlockStep(options.after || null);
+  if (step === "choice") renderConnectionChoice();
+  if (step === "create") renderCreateStep();
+  if (step === "connect") renderConnectStep();
+}
+
+function renderTokenStep(update = false) {
+  $("#onboarding-title").textContent = update ? "更新 Notion Integration Token" : "先配置 Notion Integration Token";
+  $("#onboarding-body").innerHTML = `<p>Token 是敏感认证凭证，与 Database ID、Data Source ID 和 Property ID 分开保存。请设置一个本机解锁口令；口令本身不会持久化。</p><label>Notion Integration Token<input id="token-input" type="password" autocomplete="off" spellcheck="false"></label><label>本机凭证口令<input id="vault-passphrase" type="password" autocomplete="new-password" minlength="8"></label><label>确认本机口令<input id="vault-passphrase-confirm" type="password" autocomplete="new-password" minlength="8"></label><div class="form-actions"><button id="save-token" class="primary">加密保存 Token</button></div>`;
+}
+
+function renderUnlockStep(after) {
+  state.pendingCredentialAction = after;
+  $("#onboarding-title").textContent = "解锁本机 Notion 凭证";
+  $("#onboarding-body").innerHTML = `<p>无需重新输入 Token。请输入保存 Token 时设置的本机口令；可使用浏览器密码管理器保存和自动填充该口令。</p><label>本机凭证口令<input id="unlock-passphrase" type="password" autocomplete="current-password"></label><div class="form-actions"><button id="unlock-cancel">取消</button><button id="unlock-submit" class="primary">解锁</button></div>`;
+}
+
+function renderConnectionChoice() {
+  $("#onboarding-title").textContent = "选择 PWA Database";
+  $("#onboarding-body").innerHTML = `<p>Token 已配置。新设备和首个设备都必须先完成凭证配置，再选择以下操作。</p><div class="choice-grid"><button class="choice-card" data-onboarding="create"><strong>创建新的 PWA Database</strong><span>在已授权给 Integration 的空白 Notion Page 下创建四个 Data Source。</span></button><button class="choice-card" data-onboarding="connect"><strong>连接已有 PWA Database</strong><span>验证四个 Data Source 和全部 Property，不匹配时停止。</span></button></div>`;
+}
+
+function renderCreateStep() {
+  $("#onboarding-title").textContent = "创建新的 PWA Database";
+  $("#onboarding-body").innerHTML = `<p>请先在 Notion 中将一个空白 Page 授权给当前 Integration，然后粘贴该 Page 的 URL 或 ID。中断时会保留恢复信息，不会盲目重复建库。</p><label>已授权的空白 Page URL / ID<input id="parent-page-input" autocomplete="off"></label><div id="onboarding-progress" class="details-box" hidden></div><div class="form-actions"><button data-onboarding="choice">返回</button><button id="create-database" class="primary">开始初始化</button></div>`;
+}
+
+function renderConnectStep() {
+  $("#onboarding-title").textContent = "连接已有 PWA Database";
+  $("#onboarding-body").innerHTML = `<p>Integration 必须已被授权访问该 Database。系统只验证并建立 ID 映射，不会改写不匹配的远程 Schema，也不会新建替代数据库。</p><label>PWA Database URL / ID<input id="database-input" autocomplete="off"></label><div id="onboarding-progress" class="details-box" hidden></div><div class="form-actions"><button data-onboarding="choice">返回</button><button id="connect-database" class="primary">验证并连接</button></div>`;
+}
+
+function onboardingProgress(message) { const el = $("#onboarding-progress"); if (el) { el.hidden = false; el.textContent = message; } }
+
+async function saveToken() {
+  const token = $("#token-input").value, passphrase = $("#vault-passphrase").value;
+  if (passphrase !== $("#vault-passphrase-confirm").value) return toast("两次输入的本机口令不一致");
+  try { await credentials.save(token, passphrase); toast("Token 已加密保存于本机"); state.connection ? $("#onboarding-dialog").close() : openOnboarding("choice"); }
+  catch (error) { toast(error.message, 4200); }
+}
+
+async function unlockToken() {
+  try {
+    await credentials.unlock($("#unlock-passphrase").value);
+    const after = state.pendingCredentialAction; state.pendingCredentialAction = null;
+    $("#onboarding-dialog").close(); setBanner("ok", "凭证已解锁；普通浏览仍只读本机数据");
+    if (after) await after(); else if (!state.connection) openOnboarding("choice");
+  } catch (error) { toast(error.message, 4200); }
+}
+
+async function requireCredential(action) {
+  if (!state.connection) {
+    if (credentials.isUnlocked()) openOnboarding("choice");
+    else if (await credentials.hasVault()) openOnboarding("unlock", { after: () => openOnboarding("choice") });
+    else openOnboarding("token");
+    return false;
+  }
+  if (!credentials.isUnlocked()) { openOnboarding("unlock", { after: action }); return false; }
+  return true;
+}
+
+async function createDatabase() {
+  try {
+    onboardingProgress("准备初始化…");
+    const recovery = await localDb.get("staging","initialization-recovery");
+    const progress = async (message, partial) => { onboardingProgress(message); if(partial)await localDb.put("staging",{localId:"initialization-recovery",...partial,updatedAt:new Date().toISOString()}); };
+    const connection = recovery?.databaseId && confirm("发现上次未完成的初始化。是否从已创建的 Database 恢复，避免重复建库？")
+      ? await notionApi.resumeInitialization(recovery,progress)
+      : await notionApi.initializeDatabase($("#parent-page-input").value,progress);
+    await localDb.saveConnection(connection); state.connection = connection;
+    await localDb.remove("staging", "initialization-recovery");
+    $("#onboarding-dialog").close(); setBanner("ok", "初始化完成；尚未上传任何本地业务记录"); renderSettings();
+  } catch (error) { onboardingProgress(error.message); setBanner("error", error.message); }
+}
+
+async function connectDatabase() {
+  try {
+    onboardingProgress("正在 Retrieve Database 与四个 Data Source Schema…");
+    const connection = await notionApi.connectDatabase($("#database-input").value);
+    await localDb.saveConnection(connection); state.connection = connection;
+    $("#onboarding-dialog").close(); setBanner("ok", "已连接；请主动点击“刷新”下载远程业务数据"); renderSettings();
+  } catch (error) { onboardingProgress(error.message); setBanner("error", error.message); }
+}
+
+function renderSettings() {
+  const config = state.connection;
+  $("#connection-details").innerHTML = config ? `<span>Database ID：${escapeHtml(config.databaseId)}</span><span>API Version：${escapeHtml(config.notionVersion)}</span><span>Schema Version：${escapeHtml(config.schemaVersion)}</span><span>凭证状态：${credentials.isUnlocked()?"已解锁":"已锁定"}</span>` : "本设备尚未连接 PWA Database。";
+}
+
+function renderDisplaySettings() {
+  $("#mobile-columns").value = state.preferences.mobileColumns;
+  $("#desktop-columns").value = state.preferences.desktopColumns;
+  $("#display-field-list").innerHTML = state.preferences.fieldOrder.map((key,index) => {
+    const field = ITEM_DISPLAY_FIELDS.find(item => item.key === key);
+    return `<div class="display-row"><input type="checkbox" data-display-field="${key}" ${state.preferences.fields.includes(key)?'checked':''}><span>${escapeHtml(field.label)}</span><button type="button" data-display-move="${key}" data-direction="-1" ${index===0?'disabled':''}>↑</button><button type="button" data-display-move="${key}" data-direction="1" ${index===state.preferences.fieldOrder.length-1?'disabled':''}>↓</button></div>`;
+  }).join("");
+}
+
+function itemOptions(selected = "", exclude = "") { return state.workspace.items.filter(item => item.localId !== exclude).map(item => `<option value="${item.localId}" ${item.localId===selected?'selected':''}>${escapeHtml(recordName(item))} ${item.notionUniqueId?`(${escapeHtml(item.notionUniqueId)})`:""}</option>`).join(""); }
+function subOptions(selected = "") { return [...state.workspace.majorCategories].sort((a,b)=>a.sort-b.sort).map(major => `<optgroup label="${escapeHtml(recordName(major))}">${state.workspace.subCategories.filter(sub=>sub.majorLocalId===major.localId).sort((a,b)=>a.sort-b.sort).map(sub=>`<option value="${sub.localId}" ${sub.localId===selected?'selected':''}>${escapeHtml(recordName(sub))}</option>`).join("")}</optgroup>`).join(""); }
+
+function openRecord(localId = null) {
+  state.editingId = localId;
+  const record = localId ? byId(state.entity, localId) : null;
+  $("#record-kind").textContent = APP_SCHEMA[state.entity].title;
+  $("#record-title").textContent = recordName(record);
+  $("#delete-local").hidden = !record;
+  if (state.entity === ENTITY.ITEM) renderItemForm(record); else renderPairingForm(record);
+  $("#record-dialog").showModal();
+}
+
+function genealogy(item) {
+  let generation = 0, cursor = item, original = item, visited = new Set();
+  while (cursor?.directSourceLocalId && !visited.has(cursor.localId)) { visited.add(cursor.localId); cursor = byId(ENTITY.ITEM,cursor.directSourceLocalId); if (cursor) { generation += 1; original = cursor; } }
+  return { generation, original };
+}
+
+function reversePairings(itemId) {
+  return state.workspace.pairings.filter(record => record.motherLocalId===itemId || record.fatherLocalId===itemId || (record.childLocalIds||[]).includes(itemId));
+}
+
+function renderItemForm(item) {
+  state.photoDraft = item ? itemPhotos(item).map(photo => ({...photo})) : [];
+  const lineage = item ? genealogy(item) : null, pairings = item ? reversePairings(item.localId) : [];
+  $("#record-fields").innerHTML = `<div class="record-meta">${item?.notionPageId?`<span>Page ID：${escapeHtml(item.notionPageId)}</span><span>正式编号：${escapeHtml(item.notionUniqueId||"等待 Notion 返回")}</span>`:'<span>本地 UUID：保存后生成</span>'}${lineage?`<span>代数：${lineage.generation}</span><span>原株：${escapeHtml(recordName(lineage.original))}</span>`:""}${pairings.length?`<span>相关配对：${pairings.length}</span>`:""}</div><div class="form-layout">
+    <label class="form-control full">名称<input name="name" value="${escapeHtml(item?.name||"")}"></label>
+    <label class="form-control">小分类（必选）<select name="subLocalId" required><option value="">请选择</option>${subOptions(item?.subLocalId)}</select></label>
+    <label class="form-control">入手日期<input name="acquisitionDate" type="date" value="${escapeHtml(item?.acquisitionDate||"")}"></label>
+    <label class="form-control full">来源<input name="source" value="${escapeHtml(item?.source||"")}"></label>
+    <label class="form-control">价格<input name="price" type="number" step="0.01" min="0" value="${escapeHtml(item?.price??"")}"></label>
+    <label class="form-control">货币<select name="currency">${["JPY","CNY","USD"].map(value=>`<option ${value===(item?.currency||"JPY")?'selected':''}>${value}</option>`).join("")}</select></label>
+    <label class="form-control">数量<input name="quantity" type="number" min="0" value="${escapeHtml(item?.quantity??1)}"></label>
+    <label class="form-control">状态<select name="status">${["在库","培育中","已售出","已枯失","其他"].map(value=>`<option ${value===(item?.status||"在库")?'selected':''}>${value}</option>`).join("")}</select></label>
+    <label class="form-control">录入类型<select name="entryType">${["播种苗","成品"].map(value=>`<option ${value===(item?.entryType||"成品")?'selected':''}>${value}</option>`).join("")}</select></label>
+    <label class="form-control">扦插日期<input name="cuttingDate" type="date" value="${escapeHtml(item?.cuttingDate||"")}"></label>
+    <label class="form-control full">直接来源（最多一个）<select name="directSourceLocalId"><option value="">无</option>${itemOptions(item?.directSourceLocalId,item?.localId)}</select></label>
+    <div class="form-control full"><span>照片（最多 5 张，第一张为主图）</span><label class="photo-picker"><input id="record-photo-input" type="file" accept="image/*,.heic,.heif" multiple>选择照片</label><div id="record-photo-strip" class="photo-strip">${renderPhotoDraft()}</div></div>
+    ${item?.notionPageId?`<div class="form-control full qr-panel"><span>正式 Notion 页面二维码</span>${qrSvg(notionLink(item))}<a href="${escapeHtml(notionLink(item))}" target="_blank" rel="noreferrer">打开 Notion 页面</a></div>`:""}
+  </div>`;
+}
+
+function renderPhotoDraft() { return state.photoDraft.map((photo,index) => `<div class="photo-tile"><img src="${escapeHtml(photoUrl(photo))}" alt=""><button type="button" data-photo-remove="${photo.localId}">×</button>${index?`<button type="button" data-photo-primary="${photo.localId}" style="top:auto;bottom:3px;left:3px;right:auto">设首</button>`:""}</div>`).join(""); }
+function refreshPhotoDraft() { const el = $("#record-photo-strip"); if (el) el.innerHTML = renderPhotoDraft(); }
+
+function renderPairingForm(record) {
+  const selectedChildren = new Set(record?.childLocalIds || []);
+  $("#record-fields").innerHTML = `<div class="record-meta">${record?.notionPageId?`<span>Page ID：${escapeHtml(record.notionPageId)}</span>`:'<span>本地记录</span>'}</div><div class="form-layout">
+    <label class="form-control full">记录名称（留空时自动生成）<input name="name" value="${escapeHtml(record?.name||"")}"></label>
+    <label class="form-control">母本（必选）<select name="motherLocalId" required><option value="">请选择</option>${itemOptions(record?.motherLocalId)}</select></label>
+    <label class="form-control">父本（必选）<select name="fatherLocalId" required><option value="">请选择</option>${itemOptions(record?.fatherLocalId)}</select></label>
+    <label class="form-control">授粉日期<input name="pollinationDate" type="date" value="${escapeHtml(record?.pollinationDate||"")}"></label>
+    <label class="form-control">结种／收种日期<input name="harvestDate" type="date" value="${escapeHtml(record?.harvestDate||"")}"></label>
+    <label class="form-control full">子代（可多选）<select class="relation-select" name="childLocalIds" multiple>${state.workspace.items.map(item=>`<option value="${item.localId}" ${selectedChildren.has(item.localId)?'selected':''}>${escapeHtml(recordName(item))}</option>`).join("")}</select></label>
+  </div>`;
+}
+
+async function saveRecordLocal() {
+  const form = $("#record-form");
+  if (!form.reportValidity()) return null;
+  const existing = state.editingId ? byId(state.entity,state.editingId) : null;
+  let record = existing ? {...existing} : createLocalRecord(state.entity);
+  if (state.entity === ENTITY.ITEM) {
+    const values = Object.fromEntries(new FormData(form).entries());
+    Object.assign(record, {
+      name: values.name.trim(), subLocalId: values.subLocalId, acquisitionDate: values.acquisitionDate,
+      source: values.source.trim(), price: values.price === "" ? null : Number(values.price), currency: values.currency,
+      quantity: Number(values.quantity || 1), status: values.status, entryType: values.entryType,
+      directSourceLocalId: values.directSourceLocalId || null, cuttingDate: values.cuttingDate
+    });
+    if (wouldCreateSourceCycle(record.localId, record.directSourceLocalId, state.workspace.items)) return toast("直接来源会形成循环，已阻止保存"), null;
+    const previousPhotoIds = existing?.photoIds || [];
+    const oldIds = new Set(previousPhotoIds);
+    record.photoIds = state.photoDraft.map(photo => photo.localId);
+    record.photosChanged = record.photoIds.length !== previousPhotoIds.length || record.photoIds.some((id,index) => id !== previousPhotoIds[index]);
+    for (const [index, draftPhoto] of state.photoDraft.entries()) {
+      const photo = { ...draftPhoto, order: index, itemLocalId: record.localId };
+      if (photo.blob && !photo.fileUploadId) photo.pending = true;
+      await localDb.put("photos", photo);
+      oldIds.delete(photo.localId);
+    }
+    for (const removedId of oldIds) await localDb.remove("photos",removedId);
+    if (!existing && state.photoDraft.length) record.photosChanged = true;
+  } else {
+    const values = Object.fromEntries(new FormData(form).entries());
+    const mother = byId(ENTITY.ITEM,values.motherLocalId), father = byId(ENTITY.ITEM,values.fatherLocalId);
+    Object.assign(record, {
+      name: values.name.trim() || `${recordName(mother)} × ${recordName(father)}${values.pollinationDate?` · ${values.pollinationDate}`:""}`,
+      motherLocalId: values.motherLocalId, fatherLocalId: values.fatherLocalId,
+      pollinationDate: values.pollinationDate, harvestDate: values.harvestDate,
+      childLocalIds: [...form.elements.childLocalIds.selectedOptions].map(option=>option.value)
+    });
+  }
+  record.dirty=true; record.pending=true; record.uploadError=null; record.updatedAt=new Date().toISOString();
+  await localDb.put(state.entity,record); state.editingId=record.localId;
+  await reloadWorkspace(); toast("已保存到本机 IndexedDB；未自动上传");
+  return record;
+}
+
+async function saveAndUpload() {
+  const record = await saveRecordLocal(); if (!record) return;
+  if (!(await requireCredential(() => uploadCurrent(record)))) return;
+  await uploadCurrent(record);
+}
+
+async function uploadCurrent(record, force = false) {
+  try {
+    setBanner("warning", `正在上传“${recordName(record)}”…`);
+    await syncCoordinator.uploadRecord(state.entity,record.localId,state.connection,{force});
+    await reloadWorkspace(); $("#record-dialog").close(); setBanner("ok","当前记录及必要依赖已上传");
+  } catch (error) {
+    const failed = byId(state.entity, record.localId);
+    if (failed) { failed.uploadError = error.message; await localDb.put(state.entity, failed); }
+    if (error.code === "local_remote_conflict" && confirm(`${error.message}\n\n确定以本地版本覆盖 Notion 吗？`)) return uploadCurrent(record,true);
+    setBanner("error",error.message); toast(error.message,5000);
+  }
+}
+
+async function refreshRemote() {
+  if (!(await requireCredential(refreshRemote))) return;
+  try {
+    setBanner("warning","正在从 Notion 分页读取；不会上传本地数据…");
+    state.refreshDraft = await syncCoordinator.fetchRemoteWorkspace(state.connection);
+    renderRefreshPreview(); $("#refresh-dialog").showModal(); setBanner("ok","远程读取完成，等待用户决定是否更新本地");
+  } catch (error) { setBanner("error",error.message); toast(error.message,5000); }
+}
+
+function renderRefreshPreview() {
+  const {summary} = state.refreshDraft;
+  $("#refresh-preview").innerHTML = `<div class="refresh-summary"><div><strong>${summary.additions}</strong>远程新增</div><div><strong>${summary.remoteChanges}</strong>远程变化</div><div><strong>${summary.conflicts.length}</strong>双边冲突</div><div><strong>${summary.remoteDeletes.length}</strong>远程缺失</div></div><p>刷新只更新本地，不会上传。远程缺失仅在完整分页读取后列出；本次应用会按确认结果处理。</p>${summary.conflicts.length?`<div class="conflict-list">${summary.conflicts.map(conflict=>`<label class="conflict-row"><span>${escapeHtml(conflict.name)}</span><select data-conflict-choice="${conflict.localId}"><option value="local">保留本地</option><option value="remote">采用远程</option></select></label>`).join("")}</div>`:'<p>没有双边冲突。</p>'}${summary.remoteDeletes.length?`<p>远程缺失：${summary.remoteDeletes.map(item=>escapeHtml(item.name)).join("、")}</p>`:""}`;
+}
+
+async function applyRefresh() {
+  const choices = Object.fromEntries($$("[data-conflict-choice]").map(select=>[select.dataset.conflictChoice,select.value]));
+  await syncCoordinator.applyRemote(state.refreshDraft.staging,choices); state.refreshDraft=null; $("#refresh-dialog").close(); await reloadWorkspace(); setBanner("ok","已按用户选择更新本地；未上传任何数据");
+}
+
+async function uploadPending() {
+  if (!(await requireCredential(uploadPending))) return;
+  setBanner("warning","正在上传本地待上传变化；不会先执行刷新…");
+  const results = await syncCoordinator.uploadPending(state.connection,message=>setBanner("warning",message));
+  await reloadWorkspace();
+  if (results.failed.length) { const first=results.failed[0]; setBanner("error",`${results.uploaded} 条成功，${results.failed.length} 条失败：${first.error.message}`); if(first.error.code==="local_remote_conflict"&&confirm(`${first.error.message}\n\n确定以本地版本覆盖 Notion 吗？`)){await syncCoordinator.uploadRecord(first.entity,first.localId,state.connection,{force:true});return uploadPending();} }
+  else setBanner("ok",`已上传 ${results.uploaded} 条本地变化`);
+}
+
+async function addCategory(type) {
+  const name = prompt(`输入${type===ENTITY.MAJOR?"大分类":"小分类"}名称：`); if (!name?.trim()) return;
+  const list = entityList(type);
+  if (list.some(record=>record.name.trim().toLocaleLowerCase("zh-CN")===name.trim().toLocaleLowerCase("zh-CN"))) return toast("同类分类名称不能重复");
+  if (type===ENTITY.SUB && !state.selectedMajorId) return toast("请先选择或新增大分类");
+  const record=createLocalRecord(type,{name:name.trim(),sort:Math.max(0,...list.map(item=>item.sort||0))+10});
+  if(type===ENTITY.SUB)record.majorLocalId=state.selectedMajorId;
+  await localDb.put(type,record); await reloadWorkspace();
+  if(type===ENTITY.MAJOR)state.selectedMajorId=record.localId; else state.selectedSubId=record.localId;
+  render();
+}
+
 function openCategoryManager(){renderCategoryManager();$("#category-dialog").showModal();}
-function managerRows(type,items){return items.map((item,index)=>`<div class="sort-row ${type==='major'&&item.id===state.selectedMajorId?'current':''}" draggable="true" data-sort-type="${type}" data-sort-id="${item.id}"><span class="drag-handle" title="拖动排序">≡</span><input value="${escapeHtml(item.name)}" data-category-name="${type}:${item.id}" aria-label="分类名称"><button type="button" data-category-move="${type}:${item.id}" data-direction="${index===0?1:-1}" title="移动">${index===0?'↓':'↑'}</button>${type==='major'?`<button type="button" data-manager-major="${item.id}">小分类</button>`:'<span></span>'}<button type="button" data-category-delete="${type}:${item.id}" class="danger">删除</button></div>`).join("");}
-function renderCategoryManager(){const majors=sortedMajors();if(!majors.some(item=>item.id===state.selectedMajorId))state.selectedMajorId=majors[0]?.id||"";$("#major-manager").innerHTML=managerRows("major",majors);$("#sub-manager").innerHTML=managerRows("sub",sortedSubs(state.selectedMajorId));const subs=categories.sub.slice().sort((a,b)=>a.name.localeCompare(b.name,"zh-CN"));$("#batch-target").innerHTML=subs.map(item=>`<option value="${item.id}">${escapeHtml(categoryName(item.majorId,"major"))} › ${escapeHtml(item.name)}</option>`).join("");$("#batch-records").innerHTML=data.purchases.map(record=>`<label><input type="checkbox" value="${record.id}" name="batch-record"> ${escapeHtml(recordLabel(record))}<small class="muted"> · ${escapeHtml(categoryName(record.subCategoryId,"sub"))}</small></label>`).join("");}
-function previewBatch(){const ids=[...document.querySelectorAll('[name="batch-record"]:checked')].map(input=>input.value),targetId=$("#batch-target").value,target=categories.sub.find(item=>item.id===targetId);if(!ids.length||!target){toast("请选择记录和目标小分类");return;}state.batchDraft={ids,targetId,majorId:target.majorId};$("#batch-preview").innerHTML=`<p>以下 ${ids.length} 条记录将移动到 <strong>${escapeHtml(categoryName(target.majorId,"major"))} › ${escapeHtml(target.name)}</strong>：</p><ul>${ids.map(id=>{const record=getRecord("purchases",id);return`<li>${escapeHtml(recordLabel(record))}：${escapeHtml(categoryName(record.subCategoryId,"sub"))} → ${escapeHtml(target.name)}</li>`;}).join("")}</ul><p class="muted">确认后立即更新画面，并进入本地待同步队列。</p>`;$("#batch-dialog").showModal();}
-function confirmBatch(){const draft=state.batchDraft;if(!draft)return;draft.ids.forEach(id=>{const record=getRecord("purchases",id);if(record){record.majorCategoryId=draft.majorId;record.subCategoryId=draft.targetId;}});queueChange(`batch:${Date.now()}`,"batch-reclassify",draft);$("#batch-dialog").close();state.batchDraft=null;render();renderCategoryManager();toast("批量调整已应用并等待本地暂存");}
+function renderCategoryManager(){const majors=[...state.workspace.majorCategories].sort((a,b)=>a.sort-b.sort);$("#major-manager").innerHTML=`<div class="manager-list">${majors.map((record,index)=>`<div class="manager-row ${record.localId===state.selectedMajorId?'current':''}"><input data-category-name="${ENTITY.MAJOR}:${record.localId}" value="${escapeHtml(record.name)}"><button type="button" data-manage-major="${record.localId}">小分类</button><button type="button" data-category-move="${ENTITY.MAJOR}:${record.localId}" data-direction="${index===0?1:-1}">${index===0?'↓':'↑'}</button></div>`).join("")}<button type="button" data-category-add="${ENTITY.MAJOR}">＋ 新增大分类</button></div>`;const subs=state.workspace.subCategories.filter(record=>record.majorLocalId===state.selectedMajorId).sort((a,b)=>a.sort-b.sort);$("#sub-manager").innerHTML=`<div class="manager-list">${subs.map((record,index)=>`<div class="manager-row"><input data-category-name="${ENTITY.SUB}:${record.localId}" value="${escapeHtml(record.name)}"><span></span><button type="button" data-category-move="${ENTITY.SUB}:${record.localId}" data-direction="${index===0?1:-1}">${index===0?'↓':'↑'}</button></div>`).join("")}<button type="button" data-category-add="${ENTITY.SUB}">＋ 新增小分类</button></div>`;}
 
-document.addEventListener("click",event=>{
-  const tab=event.target.closest(".tab");if(tab){state.db=tab.dataset.db;state.query="";state.filter="all";state.selected=null;$("#search").value="";render();return;}
-  const layout=event.target.closest("[data-layout]");if(layout){preferences.layout=layout.dataset.layout;savePreferences();render();return;}
-  const major=event.target.closest("[data-major]");if(major){state.selectedMajorId=major.dataset.major;state.selectedSubId=sortedSubs(state.selectedMajorId)[0]?.id||"";render();return;}
+async function renameCategory(target,value){const[entity,id]=target.split(":"),record=byId(entity,id);if(!record||!value.trim())return renderCategoryManager();if(entityList(entity).some(item=>item.localId!==id&&item.name.trim().toLocaleLowerCase("zh-CN")===value.trim().toLocaleLowerCase("zh-CN"))){toast("同类分类名称不能重复");return renderCategoryManager();}record.name=value.trim();record.dirty=true;record.pending=true;record.updatedAt=new Date().toISOString();await localDb.put(entity,record);await reloadWorkspace();renderCategoryManager();}
+async function moveCategory(target,direction){const[entity,id]=target.split(":"),record=byId(entity,id);const list=entity===ENTITY.MAJOR?[...state.workspace.majorCategories].sort((a,b)=>a.sort-b.sort):state.workspace.subCategories.filter(item=>item.majorLocalId===record.majorLocalId).sort((a,b)=>a.sort-b.sort);const index=list.findIndex(item=>item.localId===id),other=list[index+Number(direction)];if(!other)return;[record.sort,other.sort]=[other.sort,record.sort];record.dirty=record.pending=other.dirty=other.pending=true;await Promise.all([localDb.put(entity,record),localDb.put(entity,other)]);await reloadWorkspace();renderCategoryManager();}
+
+document.addEventListener("click",async event=>{
+  const entity=event.target.closest("[data-entity]");if(entity){state.entity=entity.dataset.entity;state.query="";$("#search").value="";render();return;}
+  const major=event.target.closest("[data-major]");if(major){state.selectedMajorId=major.dataset.major;state.selectedSubId=null;render();return;}
   const sub=event.target.closest("[data-sub]");if(sub){state.selectedSubId=sub.dataset.sub;render();return;}
-  const edit=event.target.closest("[data-edit]");if(edit){openRecord(state.db,edit.dataset.edit);return;}
-  const jump=event.target.closest("[data-jump-id]");if(jump){openRecord(jump.dataset.jumpDb,jump.dataset.jumpId,{pushHistory:true});return;}
-  const cell=event.target.closest("td[data-key]");if(cell&&!event.target.closest("button")){$$("td.selected").forEach(element=>element.classList.remove("selected"));cell.classList.add("selected");state.selected={id:cell.closest("tr").dataset.id,key:cell.dataset.key};return;}
-  const copy=event.target.closest("[data-copy-field]");if(copy&&state.editing){const record=getRecord(state.editing.db,state.editing.id),field=getSchema(state.editing.db).find(item=>item.key===copy.dataset.copyField);copyText(displayValue(state.editing.db,record,field));return;}
-  const inline=event.target.closest("[data-inline-category]");if(inline){const form=$("#record-form"),majorId=form.elements.majorCategoryId?.value||state.selectedMajorId,newId=addCategory(inline.dataset.inlineCategory,majorId);if(newId&&inline.dataset.inlineCategory==="major"){const select=form.elements.majorCategoryId;select.insertAdjacentHTML("beforeend",`<option value="${newId}">${escapeHtml(categoryName(newId,"major"))}</option>`);select.value=newId;form.elements.subCategoryId.innerHTML="";}if(newId&&inline.dataset.inlineCategory==="sub"){const select=form.elements.subCategoryId;select.insertAdjacentHTML("beforeend",`<option value="${newId}">${escapeHtml(categoryName(newId,"sub"))}</option>`);select.value=newId;}return;}
-  const primary=event.target.closest("[data-photo-primary]");if(primary){state.primaryPhotoDraft=primary.dataset.photoPrimary;refreshPhotoEditor();return;}
-  const photoDelete=event.target.closest("[data-photo-delete]");if(photoDelete){const id=photoDelete.dataset.photoDelete;state.photoDraft=state.photoDraft.filter(photo=>photo.id!==id);if(state.primaryPhotoDraft===id)state.primaryPhotoDraft="";refreshPhotoEditor();return;}
-  const moduleMove=event.target.closest("[data-module-move]");if(moduleMove){const index=preferences.modules.indexOf(moduleMove.dataset.moduleMove),target=index+Number(moduleMove.dataset.direction);if(target>=0&&target<preferences.modules.length){preferences.modules.splice(target,0,preferences.modules.splice(index,1)[0]);savePreferences();render();}return;}
-  const moduleToggle=event.target.closest("[data-module-toggle]");if(moduleToggle){const id=moduleToggle.dataset.moduleToggle,index=preferences.modules.indexOf(id);if(index>=0)preferences.modules.splice(index,1);else preferences.modules.push(id);savePreferences();render();return;}
-  const managerMajor=event.target.closest("[data-manager-major]");if(managerMajor){state.selectedMajorId=managerMajor.dataset.managerMajor;renderCategoryManager();return;}
-  const categoryAdd=event.target.closest("[data-category-add]");if(categoryAdd){addCategory(categoryAdd.dataset.categoryAdd);return;}
-  const categoryMove=event.target.closest("[data-category-move]");if(categoryMove){const[type,id]=categoryMove.dataset.categoryMove.split(":");moveCategory(type,id,Number(categoryMove.dataset.direction));return;}
-  const categoryDelete=event.target.closest("[data-category-delete]");if(categoryDelete){const[type,id]=categoryDelete.dataset.categoryDelete.split(":");deleteCategory(type,id);return;}
+  const open=event.target.closest("[data-open-record]");if(open){openRecord(open.dataset.openRecord);return;}
+  const view=event.target.closest("[data-desktop-view]");if(view){state.preferences.desktopView=view.dataset.desktopView;savePreferences();render();return;}
+  const route=event.target.closest("[data-onboarding]");if(route){openOnboarding(route.dataset.onboarding);return;}
+  if(event.target.id==="save-token")return saveToken();
+  if(event.target.id==="unlock-submit")return unlockToken();
+  if(event.target.id==="unlock-cancel")return $("#onboarding-dialog").close();
+  if(event.target.id==="create-database")return createDatabase();
+  if(event.target.id==="connect-database")return connectDatabase();
+  const removePhoto=event.target.closest("[data-photo-remove]");if(removePhoto){state.photoDraft=state.photoDraft.filter(photo=>photo.localId!==removePhoto.dataset.photoRemove);refreshPhotoDraft();return;}
+  const primaryPhoto=event.target.closest("[data-photo-primary]");if(primaryPhoto){const index=state.photoDraft.findIndex(photo=>photo.localId===primaryPhoto.dataset.photoPrimary);state.photoDraft.unshift(...state.photoDraft.splice(index,1));refreshPhotoDraft();return;}
+  const displayMove=event.target.closest("[data-display-move]");if(displayMove){const index=state.preferences.fieldOrder.indexOf(displayMove.dataset.displayMove),target=index+Number(displayMove.dataset.direction);if(target>=0&&target<state.preferences.fieldOrder.length){state.preferences.fieldOrder.splice(target,0,state.preferences.fieldOrder.splice(index,1)[0]);savePreferences();renderDisplaySettings();render();}return;}
+  const manageMajor=event.target.closest("[data-manage-major]");if(manageMajor){state.selectedMajorId=manageMajor.dataset.manageMajor;renderCategoryManager();return;}
+  const categoryAdd=event.target.closest("[data-category-add]");if(categoryAdd){await addCategory(categoryAdd.dataset.categoryAdd);renderCategoryManager();return;}
+  const categoryMove=event.target.closest("[data-category-move]");if(categoryMove)return moveCategory(categoryMove.dataset.categoryMove,categoryMove.dataset.direction);
 });
 
-document.addEventListener("change",event=>{
-  if(event.target.id==="photo-input"){addPhotoFiles([...event.target.files]);return;}
-  if(event.target.matches("[data-photo-date]")){const photo=state.photoDraft.find(item=>item.id===event.target.dataset.photoDate);if(photo){photo.date=event.target.value;photo.dateSource=event.target.value?"人工指定":"未知";refreshPhotoEditor();}return;}
-  if(event.target.name==="majorCategoryId"){const subSelect=$("#record-form").elements.subCategoryId,subs=sortedSubs(event.target.value);subSelect.innerHTML=subs.map(item=>`<option value="${item.id}">${escapeHtml(item.name)}</option>`).join("");return;}
-  if(event.target.matches("[data-category-name]")){const[type,id]=event.target.dataset.categoryName.split(":");renameCategory(type,id,event.target.value);}
+document.addEventListener("change",async event=>{
+  if(event.target.id==="record-photo-input"){
+    const files=[...event.target.files].slice(0,Math.max(0,5-state.photoDraft.length));
+    files.forEach(file=>state.photoDraft.push({localId:crypto.randomUUID(),name:file.name,blob:file,order:state.photoDraft.length,dirty:true,pending:true}));
+    if(event.target.files.length>files.length)toast("每条具体资料最多保存 5 张照片");refreshPhotoDraft();return;
+  }
+  if(event.target.matches("[data-display-field]")){const key=event.target.dataset.displayField;if(event.target.checked&&!state.preferences.fields.includes(key))state.preferences.fields.push(key);if(!event.target.checked)state.preferences.fields=state.preferences.fields.filter(item=>item!==key);savePreferences();render();return;}
+  if(event.target.matches("[data-category-name]"))return renameCategory(event.target.dataset.categoryName,event.target.value);
 });
-
-let draggedCategory=null;
-document.addEventListener("dragstart",event=>{const row=event.target.closest("[data-sort-id]");if(row){draggedCategory={type:row.dataset.sortType,id:row.dataset.sortId};row.classList.add("dragging");}});
-document.addEventListener("dragend",event=>{event.target.closest("[data-sort-id]")?.classList.remove("dragging");draggedCategory=null;});
-document.addEventListener("dragover",event=>{if(event.target.closest("[data-sort-id]"))event.preventDefault();});
-document.addEventListener("drop",event=>{const row=event.target.closest("[data-sort-id]");if(row&&draggedCategory){event.preventDefault();reorderByDrop(draggedCategory.type,draggedCategory.id,row.dataset.sortId);}});
 
 $("#search").addEventListener("input",event=>{state.query=event.target.value;render();});
-$("#filter").addEventListener("change",event=>{state.filter=event.target.value;render();});
-$("#column-count").addEventListener("change",event=>{preferences.columns=Number(event.target.value);savePreferences();render();});
-$("#add-major").addEventListener("click",()=>addCategory("major"));
-$("#add-sub").addEventListener("click",()=>addCategory("sub"));
+$("#add-record").addEventListener("click",()=>openRecord());
+$("#add-major").addEventListener("click",()=>addCategory(ENTITY.MAJOR));
+$("#add-sub").addEventListener("click",()=>addCategory(ENTITY.SUB));
 $("#manage-categories").addEventListener("click",openCategoryManager);
-$("#add-record").addEventListener("click",()=>{if(state.db==="purchases"&&(!state.selectedMajorId||!state.selectedSubId)){toast("请先选择或新建大分类和小分类");return;}const record=blankRecord(state.db);data[state.db].push(record);state.creating={db:state.db,id:record.id};render();openRecord(state.db,record.id);});
-$("#reset-data").addEventListener("click",()=>{if(confirm("恢复 v0.2 初始模拟数据？本地当前内容将被替换，并进入待同步演示队列。")){data=structuredClone(initialData);categories=structuredClone(initialCategories);state.selectedMajorId="m1";state.selectedSubId="c1";queueChange("reset","local-reset");render();toast("已恢复初始模拟数据");}});
-$("#record-form").addEventListener("submit",event=>{event.preventDefault();saveEditing();});
-$$(".close-dialog").forEach(button=>button.addEventListener("click",closeRecord));
-$("#delete-record").addEventListener("click",deleteEditing);
-$("#copy-record").addEventListener("click",()=>{if(state.editing)copyText(recordAsText(state.editing.db,getRecord(state.editing.db,state.editing.id)));});
-$("#back-record").addEventListener("click",()=>{const previous=state.history.pop();if(previous)openRecord(previous.db,previous.id);});
-$("#paste-grid").addEventListener("click",openPaste);
-$$(".close-paste").forEach(button=>button.addEventListener("click",()=>$("#paste-dialog").close()));
-$("#paste-form").addEventListener("submit",event=>{event.preventDefault();applyPaste();});
-$("#paste-input").addEventListener("input",event=>{const rows=event.target.value.replace(/\r/g,"").split("\n").filter(Boolean);$("#paste-preview").textContent=rows.length?`检测到 ${rows.length} 行，最多 ${Math.max(...rows.map(row=>row.split("\t").length))} 列。`:"";});
-$("#desktop-table").addEventListener("keydown",event=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="c"&&state.selected){const record=getRecord(state.db,state.selected.id),field=getSchema().find(item=>item.key===state.selected.key);copyText(displayValue(state.db,record,field));event.preventDefault();}if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="v"){openPaste();event.preventDefault();}});
-$("#desktop-table").addEventListener("dblclick",event=>{const row=event.target.closest("tr[data-id]");if(row)openRecord(state.db,row.dataset.id);});
-$("#record-dialog").addEventListener("cancel",event=>{event.preventDefault();closeRecord();});
-$$(".close-category").forEach(button=>button.addEventListener("click",()=>$("#category-dialog").close()));
-$("#preview-batch").addEventListener("click",previewBatch);
-$$(".close-batch").forEach(button=>button.addEventListener("click",()=>$("#batch-dialog").close()));
-$("#confirm-batch").addEventListener("click",confirmBatch);
+$("#refresh-remote").addEventListener("click",refreshRemote);
+$("#upload-pending").addEventListener("click",uploadPending);
+$("#open-settings").addEventListener("click",()=>{renderSettings();$("#settings-dialog").showModal();});
+$("#display-settings").addEventListener("click",()=>{renderDisplaySettings();$("#display-dialog").showModal();});
+$("#mobile-columns").addEventListener("change",event=>{state.preferences.mobileColumns=Number(event.target.value);savePreferences();render();});
+$("#desktop-columns").addEventListener("change",event=>{state.preferences.desktopColumns=Number(event.target.value);savePreferences();render();});
+$("#record-form").addEventListener("submit",async event=>{event.preventDefault();const record=await saveRecordLocal();if(record)$("#record-dialog").close();});
+$("#save-upload").addEventListener("click",saveAndUpload);
+$("#delete-local").addEventListener("click",async()=>{const record=byId(state.entity,state.editingId);if(record?.notionPageId)return toast("已同步记录不能仅在本地删除；远程归档将在后续明确版本处理");if(record&&confirm("仅删除这条尚未上传的本地记录？")){if(state.entity===ENTITY.ITEM)for(const id of record.photoIds||[])await localDb.remove("photos",id);await localDb.remove(state.entity,record.localId);$("#record-dialog").close();await reloadWorkspace();}});
+$("#apply-refresh").addEventListener("click",applyRefresh);
+$("#update-token").addEventListener("click",()=>{$("#settings-dialog").close();openOnboarding("token",{update:true});});
+$("#unlock-token").addEventListener("click",()=>{$("#settings-dialog").close();openOnboarding("unlock");});
+$("#reconnect-database").addEventListener("click",async()=>{$("#settings-dialog").close();if(await requireCredential(()=>openOnboarding("connect")))openOnboarding("connect");});
+$("#clear-device-config").addEventListener("click",async()=>{if(confirm("清除本设备连接和加密凭证？远程 Notion 数据不会删除，本地业务草稿会保留。")){await localDb.clearConnection();credentials.lock();state.connection=null;$("#settings-dialog").close();setBanner("warning","本设备连接已清除；本地业务草稿仍保留");openOnboarding("token");}});
+$$('.close-settings').forEach(button=>button.addEventListener('click',()=>$("#settings-dialog").close()));
+$$('.close-display').forEach(button=>button.addEventListener('click',()=>$("#display-dialog").close()));
+$$('.close-record').forEach(button=>button.addEventListener('click',()=>$("#record-dialog").close()));
+$$('.close-category').forEach(button=>button.addEventListener('click',()=>$("#category-dialog").close()));
+$$('.close-refresh').forEach(button=>button.addEventListener('click',()=>$("#refresh-dialog").close()));
 
-document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="hidden")commitPendingChanges();else dataAdapter.flush();});
-window.addEventListener("online",()=>dataAdapter.flush());
-if("serviceWorker"in navigator)window.addEventListener("load",()=>navigator.serviceWorker.register("./sw.js").catch(()=>setSyncState("离线缓存注册失败 · 请人工检查")));
+async function initialize() {
+  try {
+    await localDb.open(); state.connection=await localDb.getConnection(); await reloadWorkspace();
+    if(!state.connection){setBanner("warning","请先配置 Token，再创建或连接 PWA Database");openOnboarding(await credentials.hasVault()?"unlock":"token");}
+    else setBanner("ok","已加载本机数据；未自动请求 Notion，凭证当前已锁定");
+  } catch(error){setBanner("error",`本机 IndexedDB 初始化失败：${error.message}`);}
+  if("serviceWorker" in navigator)navigator.serviceWorker.register("./sw.js").catch(()=>setBanner("warning","本机数据可用，但离线应用壳注册失败"));
+}
 
-function restorePhotoUrls(){data.purchases.forEach(record=>(record.photos||[]).forEach(photo=>{if(photo.blob)photo.url=URL.createObjectURL(photo.blob);}));}
-async function initialize(){try{await dataAdapter.open();const saved=await dataAdapter.load();if(saved?.data&&saved?.categories){data=saved.data;categories=saved.categories;restorePhotoUrls();}await dataAdapter.flush();}catch{setSyncState("IndexedDB 不可用 · 当前会话内暂存");}render();}
 initialize();

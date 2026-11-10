@@ -1,9 +1,15 @@
-const CACHE_NAME = "notion-pwa-v0.2-static-1";
+const CACHE_NAME = "notion-pwa-v0.3-static-1";
 const APP_SHELL = [
   "./",
   "./index.html",
   "./style.css",
   "./app.js",
+  "./schema.js",
+  "./storage.js",
+  "./credentials.js",
+  "./notion-api.js",
+  "./sync.js",
+  "./qr.js",
   "./manifest.json",
   "./assets/icon.svg",
   "./assets/icon-180.png",

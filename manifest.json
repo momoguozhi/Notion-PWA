@@ -1,7 +1,7 @@
 {
-  "name": "记录台 · 分类照片 PWA",
+  "name": "记录台 · Notion 数据源 PWA",
   "short_name": "记录台",
-  "description": "分类、照片与多字段记录操作的本地暂存 PWA 原型。",
+  "description": "以本地优先、手动同步方式连接 Notion 2026-03-11 Data Source 的记录 PWA。",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

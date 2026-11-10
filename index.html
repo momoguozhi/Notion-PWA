@@ -5,9 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#202124">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="记录台">
-  <title>记录台 · 分类照片 PWA</title>
+  <title>记录台 · Notion 数据 PWA</title>
   <link rel="manifest" href="./manifest.json">
   <link rel="icon" href="./assets/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="./assets/icon-180.png">
@@ -15,101 +14,96 @@
 </head>
 <body>
   <header class="app-header">
-    <div class="brand"><span class="brand-mark">N</span><div><strong>记录台</strong><small>分类与照片 PWA · v0.2</small></div></div>
-    <nav class="database-tabs" aria-label="数据库切换">
-      <button class="tab active" data-db="purchases">采购清单 <span id="purchase-count"></span></button>
-      <button class="tab" data-db="sales">售出记录 <span id="sale-count"></span></button>
+    <div class="brand"><span class="brand-mark">N</span><div><strong>记录台</strong><small>Notion 本地优先 PWA · v0.3</small></div></div>
+    <nav class="entity-tabs" aria-label="资料类型">
+      <button class="entity-tab active" data-entity="items">具体资料 <span id="item-count">0</span></button>
+      <button class="entity-tab" data-entity="pairings">配对记录 <span id="pairing-count">0</span></button>
     </nav>
+    <div class="header-actions">
+      <button id="refresh-remote" title="只从 Notion 读取，不上传">↻ 刷新</button>
+      <button id="upload-pending" title="只上传本地待上传变化">⇧ 上传本地数据</button>
+      <button id="open-settings" aria-label="设置">⚙</button>
+    </div>
   </header>
 
-  <div class="demo-notice" role="status"><strong>模拟／未连接 Notion</strong>：修改会在本机暂存，不会发送网络请求或写入真实 Notion。<span id="sync-state">本地状态准备中</span></div>
+  <div id="connection-banner" class="connection-banner" role="status">
+    <strong id="connection-label">本地模式</strong><span id="sync-state">正在读取本机数据…</span>
+  </div>
 
   <main>
-    <section id="home-controls" class="home-controls" aria-label="手机首页布局">
-      <div class="layout-switch" role="group" aria-label="首页布局">
-        <button data-layout="category" class="active">分类导航</button>
-        <button data-layout="gallery">图片图库</button>
-        <button data-layout="custom">自定义组合</button>
-      </div>
-      <label class="column-setting">每行 <select id="column-count" aria-label="每行列数"><option>3</option><option selected>4</option><option>5</option><option>6</option></select> 列</label>
-    </section>
-
     <section id="category-browser" class="category-browser" aria-label="分类导航">
-      <div class="category-row-wrap">
-        <div id="major-categories" class="category-scroll"></div>
-        <button id="add-major" class="category-fixed" aria-label="新增大分类">＋</button>
-      </div>
-      <div class="category-row-wrap sub-row">
-        <div id="sub-categories" class="category-scroll"></div>
-        <button id="add-sub" class="category-fixed" aria-label="新增小分类">＋</button>
-        <button id="manage-categories" class="category-manage">管理</button>
-      </div>
+      <div class="category-row-wrap"><div id="major-categories" class="category-scroll"></div><button id="add-major" class="category-fixed">＋</button></div>
+      <div class="category-row-wrap sub-row"><div id="sub-categories" class="category-scroll"></div><button id="add-sub" class="category-fixed">＋</button><button id="manage-categories">管理</button></div>
     </section>
 
-    <section class="toolbar" aria-label="记录操作">
-      <label class="search"><span>⌕</span><input id="search" type="search" placeholder="搜索当前数据库…" autocomplete="off"></label>
-      <select id="filter" aria-label="筛选条件"></select>
-      <button id="add-record" class="primary">＋ 新增记录</button>
-      <button id="paste-grid" class="desktop-action">粘贴表格</button>
-      <button id="reset-data" class="quiet" title="恢复初始模拟数据">重置</button>
+    <section class="toolbar" aria-label="资料操作">
+      <label class="search"><span>⌕</span><input id="search" type="search" placeholder="搜索本地资料…" autocomplete="off"></label>
+      <button id="add-record" class="primary">＋ 新增</button>
+      <div class="desktop-view-switch" role="group" aria-label="Windows 显示方式">
+        <button data-desktop-view="table" class="active">表格</button><button data-desktop-view="cards">图片卡片</button>
+      </div>
+      <button id="display-settings">显示字段</button>
     </section>
 
     <section class="content-shell">
-      <div class="view-heading">
-        <div><h1 id="view-title">采购清单</h1><p id="view-subtitle"></p></div>
-        <span class="desktop-hint">点击单元格选中；双击记录或使用“编辑”打开完整字段</span>
-      </div>
-      <div id="desktop-table" class="table-wrap" tabindex="0" aria-label="响应式数据表格"></div>
-      <div id="mobile-home" class="mobile-home" aria-live="polite"></div>
-      <div id="empty-state" class="empty" hidden>没有符合条件的记录。</div>
+      <div class="view-heading"><div><h1 id="view-title">具体资料</h1><p id="view-subtitle">日常操作仅读取本机 IndexedDB</p></div><span id="pending-summary" class="pending-pill"></span></div>
+      <div id="desktop-table" class="table-wrap" tabindex="0"></div>
+      <div id="desktop-cards" class="desktop-cards"></div>
+      <div id="mobile-grid" class="mobile-grid"></div>
+      <div id="empty-state" class="empty" hidden>暂无符合条件的本地记录。</div>
     </section>
   </main>
 
+  <dialog id="onboarding-dialog" class="onboarding-dialog">
+    <div class="dialog-header"><div><small>本设备首次配置</small><h2 id="onboarding-title">配置 Notion Integration Token</h2></div></div>
+    <div id="onboarding-body" class="dialog-body"></div>
+  </dialog>
+
+  <dialog id="settings-dialog">
+    <form method="dialog">
+      <header class="dialog-header"><div><small>本设备设置</small><h2>连接与凭证</h2></div><button type="button" class="icon-button close-settings">×</button></header>
+      <div class="dialog-body settings-body">
+        <section><h3>当前 PWA Database</h3><div id="connection-details" class="details-box"></div></section>
+        <section><h3>Notion Integration Token</h3><p>Token 使用用户口令经 PBKDF2 派生密钥后，以 AES-GCM 密文保存于本机 IndexedDB；口令和解密密钥不会持久化。</p><button type="button" id="update-token">更新／重新输入 Token</button><button type="button" id="unlock-token">解锁凭证</button></section>
+        <section><h3>连接操作</h3><button type="button" id="reconnect-database">重新连接已有 Database</button><button type="button" id="clear-device-config" class="danger">清除本设备连接配置</button><p class="muted">清除本设备配置不会删除远程 Database 或远程业务数据。</p></section>
+      </div>
+      <footer class="dialog-footer"><span class="footer-spacer"></span><button type="button" class="close-settings">完成</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="display-dialog">
+    <form method="dialog">
+      <header class="dialog-header"><div><small>仅保存在本设备</small><h2>显示字段与密度</h2></div><button type="button" class="icon-button close-display">×</button></header>
+      <div class="dialog-body"><label>手机每行列数 <select id="mobile-columns"><option>3</option><option>4</option><option>5</option><option>6</option></select></label><label>Windows 卡片列数 <select id="desktop-columns"><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option></select></label><p class="muted">勾选字段并用箭头调整卡片上的显示顺序。</p><div id="display-field-list" class="display-field-list"></div></div>
+      <footer class="dialog-footer"><span class="footer-spacer"></span><button type="button" class="close-display">完成</button></footer>
+    </form>
+  </dialog>
+
   <dialog id="record-dialog" class="record-dialog">
     <form id="record-form" method="dialog">
-      <header class="dialog-header">
-        <button type="button" id="back-record" class="icon-button" hidden aria-label="返回上一条记录">←</button>
-        <div><small id="dialog-db"></small><h2 id="dialog-title"></h2></div>
-        <button type="button" class="icon-button close-dialog" aria-label="关闭">×</button>
-      </header>
-      <div id="form-fields" class="form-fields"></div>
-      <footer class="dialog-footer">
-        <button type="button" id="copy-record">复制整条记录</button>
-        <button type="button" id="delete-record" class="danger">删除</button>
-        <span class="footer-spacer"></span>
-        <button type="button" class="close-dialog">取消</button>
-        <button type="submit" class="primary">保存修改</button>
-      </footer>
+      <header class="dialog-header"><div><small id="record-kind"></small><h2 id="record-title"></h2></div><button type="button" class="icon-button close-record">×</button></header>
+      <div id="record-fields" class="dialog-body form-fields"></div>
+      <footer class="dialog-footer"><button type="button" id="delete-local" class="danger">删除本地</button><span class="footer-spacer"></span><button type="button" class="close-record">取消</button><button type="submit">保存本地</button><button type="button" id="save-upload" class="primary">保存并上传</button></footer>
     </form>
   </dialog>
 
-  <dialog id="category-dialog" class="category-dialog">
-    <form method="dialog" id="category-form">
-      <header class="dialog-header"><div><small>本地分类管理</small><h2>分类、排序与批量调整</h2></div><button type="button" class="icon-button close-category">×</button></header>
-      <div class="category-manager-body">
-        <section><div class="section-title"><h3>大分类</h3><button type="button" data-category-add="major">＋ 新增</button></div><div id="major-manager" class="sortable-list"></div></section>
-        <section><div class="section-title"><h3>所选大分类的小分类</h3><button type="button" data-category-add="sub">＋ 新增</button></div><p class="manager-tip">拖动 ≡ 调整顺序；有记录使用的分类不能删除。</p><div id="sub-manager" class="sortable-list"></div></section>
-        <section class="batch-panel"><div class="section-title"><h3>批量调整记录</h3></div><label>目标小分类 <select id="batch-target"></select></label><div id="batch-records" class="batch-records"></div><button type="button" id="preview-batch" class="primary">预览变更</button></section>
-      </div>
-      <footer class="dialog-footer"><span class="muted">分类变更只进入本地待同步队列</span><span class="footer-spacer"></span><button type="button" class="close-category">完成</button></footer>
+  <dialog id="category-dialog">
+    <form method="dialog">
+      <header class="dialog-header"><div><small>业务数据</small><h2>分类管理</h2></div><button type="button" class="icon-button close-category">×</button></header>
+      <div class="dialog-body category-manager"><section><h3>大分类</h3><div id="major-manager"></div></section><section><h3>所选大分类的小分类</h3><div id="sub-manager"></div></section></div>
+      <footer class="dialog-footer"><span class="muted">保存本地不会自动上传 Notion</span><span class="footer-spacer"></span><button type="button" class="close-category">完成</button></footer>
     </form>
   </dialog>
 
-  <dialog id="batch-dialog" class="batch-dialog">
-    <form method="dialog"><header class="dialog-header"><div><small>执行前确认</small><h2>批量调整预览</h2></div><button type="button" class="icon-button close-batch">×</button></header><div id="batch-preview" class="batch-preview"></div><footer class="dialog-footer"><button type="button" class="close-batch">取消</button><span class="footer-spacer"></span><button type="button" id="confirm-batch" class="primary">确认调整</button></footer></form>
-  </dialog>
-
-  <dialog id="paste-dialog" class="paste-dialog">
-    <form method="dialog" id="paste-form">
-      <header class="dialog-header"><div><small>Windows / Excel</small><h2>粘贴多行多列</h2></div><button type="button" class="icon-button close-paste">×</button></header>
-      <p id="paste-help"></p>
-      <textarea id="paste-input" rows="9" placeholder="从 Excel 复制单元格后在此粘贴…"></textarea>
-      <div id="paste-preview" class="paste-preview"></div>
-      <footer class="dialog-footer"><button type="button" class="close-paste">取消</button><button type="submit" class="primary">应用数据</button></footer>
+  <dialog id="refresh-dialog">
+    <form method="dialog">
+      <header class="dialog-header"><div><small>远程读取结果</small><h2>确认更新本地数据</h2></div><button type="button" class="icon-button close-refresh">×</button></header>
+      <div id="refresh-preview" class="dialog-body"></div>
+      <footer class="dialog-footer"><button type="button" class="close-refresh">保留现状</button><span class="footer-spacer"></span><button type="button" id="apply-refresh" class="primary">按以上选择更新本地</button></footer>
     </form>
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="./app.js" defer></script>
+  <script type="module" src="./app.js"></script>
 </body>
 </html>
