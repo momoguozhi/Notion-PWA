@@ -1,7 +1,7 @@
 import { DATA_SOURCE_KEYS, ENTITY, SCHEMA_VERSION } from "./schema.js";
 
 const DB_NAME = "notion-pwa-v03";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORES = [...DATA_SOURCE_KEYS, "photos", "syncMeta", "connectionConfig", "credentialVault", "staging"];
 
 class LocalDatabase {
@@ -20,7 +20,38 @@ class LocalDatabase {
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
+    await this.migrateV04StatusRecords();
     return this.db;
+  }
+
+  async migrateV04StatusRecords() {
+    const items = await this.getAll(ENTITY.ITEM);
+    const legacyItems = items.filter(item => !item.statusLocalId && typeof item.status === "string" && item.status.trim());
+    if (!legacyItems.length) return;
+    const statuses = await this.getAll(ENTITY.STATUS);
+    const colorByName = { "在库": "green", "培育中": "blue", "已售出": "purple", "已枯失": "red", "其他": "gray" };
+    for (const item of legacyItems) {
+      const name = item.status.trim();
+      let status = statuses.find(record => record.name === name);
+      if (!status) {
+        const now = new Date().toISOString();
+        status = {
+          localId: crypto.randomUUID(), entity: ENTITY.STATUS, name,
+          color: colorByName[name] || "gray", sort: statuses.length * 10 + 10,
+          notionPageId: null, notionPageUrl: null, notionUniqueId: null,
+          dirty: true, pending: true, lastRemoteEdit: null, syncBase: null,
+          uploadError: null, createdAt: now, updatedAt: now
+        };
+        statuses.push(status);
+        await this.put(ENTITY.STATUS, status);
+      }
+      item.statusLocalId = status.localId;
+      delete item.status;
+      item.dirty = true;
+      item.pending = true;
+      item.updatedAt = new Date().toISOString();
+      await this.put(ENTITY.ITEM, item);
+    }
   }
 
   store(name, mode = "readonly") {
@@ -52,12 +83,16 @@ class LocalDatabase {
     });
   }
 
-  async loadWorkspace() {
-    const [majorCategories, subCategories, items, pairings, photos] = await Promise.all([
-      this.getAll(ENTITY.MAJOR), this.getAll(ENTITY.SUB), this.getAll(ENTITY.ITEM),
+  async loadWorkspace(includeDeleted = false) {
+    const [majorCategories, subCategories, statuses, items, pairings, photos] = await Promise.all([
+      this.getAll(ENTITY.MAJOR), this.getAll(ENTITY.SUB), this.getAll(ENTITY.STATUS), this.getAll(ENTITY.ITEM),
       this.getAll(ENTITY.PAIRING), this.getAll("photos")
     ]);
-    return { majorCategories, subCategories, items, pairings, photos };
+    const visible = records => includeDeleted ? records : records.filter(record => !record.deleted);
+    return {
+      majorCategories: visible(majorCategories), subCategories: visible(subCategories), statuses: visible(statuses),
+      items: visible(items), pairings: visible(pairings), photos
+    };
   }
 
   async saveConnection(config) {

@@ -1,7 +1,7 @@
 {
   "name": "记录台 · Notion 数据源 PWA",
   "short_name": "记录台",
-  "description": "以本地优先、手动同步方式连接 Notion 2026-03-11 Data Source 的记录 PWA。",
+  "description": "支持分类、独立状态、配对关系与持久本地存储的 Notion 记录 PWA。",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

@@ -50,6 +50,7 @@ function mapRemotePage(entity, page, connection, existing) {
   const base = remoteIdentity(page, entity, existing);
   if (entity === ENTITY.MAJOR) return { ...base, name: read(page, ids.name, "title"), sort: read(page, ids.sort, "number") ?? 0 };
   if (entity === ENTITY.SUB) return { ...base, name: read(page, ids.name, "title"), majorPageId: read(page, ids.major, "relation")[0] || null, majorLocalId: null, sort: read(page, ids.sort, "number") ?? 0 };
+  if (entity === ENTITY.STATUS) return { ...base, name: read(page, ids.name, "title"), color: read(page, ids.color, "select") || "gray", sort: read(page, ids.sort, "number") ?? 0 };
   if (entity === ENTITY.ITEM) return {
     ...base,
     name: read(page, ids.name, "title"),
@@ -61,7 +62,8 @@ function mapRemotePage(entity, page, connection, existing) {
     price: read(page, ids.price, "number"),
     currency: read(page, ids.currency, "select") || "JPY",
     quantity: read(page, ids.quantity, "number") ?? 1,
-    status: read(page, ids.status, "select") || "在库",
+    statusPageId: read(page, ids.status, "relation")[0] || null,
+    statusLocalId: null,
     entryType: read(page, ids.entryType, "select") || "成品",
     remoteFiles: read(page, ids.photos, "files"),
     photoIds: [],
@@ -85,11 +87,12 @@ function mapRemotePage(entity, page, connection, existing) {
 function fileUrl(file) { return file.file?.url || file.external?.url || ""; }
 
 function resolveRelations(staging) {
-  const all = [...staging.majorCategories, ...staging.subCategories, ...staging.items, ...staging.pairings];
+  const all = [...staging.majorCategories, ...staging.subCategories, ...staging.statuses, ...staging.items, ...staging.pairings];
   const byPage = new Map(all.filter(record => record.notionPageId).map(record => [record.notionPageId, record.localId]));
   staging.subCategories.forEach(record => { record.majorLocalId = byPage.get(record.majorPageId) || null; });
   staging.items.forEach(record => {
     record.subLocalId = byPage.get(record.subPageId) || null;
+    record.statusLocalId = byPage.get(record.statusPageId) || null;
     record.directSourceLocalId = byPage.get(record.directSourcePageId) || null;
     record.photoIds = [];
     (record.remoteFiles || []).slice(0, 5).forEach((file, order) => {
@@ -129,8 +132,8 @@ export function wouldCreateSourceCycle(itemId, sourceId, items) {
 
 class SyncCoordinator {
   async fetchRemoteWorkspace(connection) {
-    const local = await localDb.loadWorkspace();
-    const staging = { majorCategories: [], subCategories: [], items: [], pairings: [], photos: [] };
+    const local = await localDb.loadWorkspace(true);
+    const staging = { majorCategories: [], subCategories: [], statuses: [], items: [], pairings: [], photos: [] };
     for (const entity of DATA_SOURCE_KEYS) {
       const pages = await notionApi.queryAll(connection.dataSourceIds[entity]);
       const existingByPage = new Map(local[entity].filter(record => record.notionPageId).map(record => [record.notionPageId, record]));
@@ -157,7 +160,7 @@ class SyncCoordinator {
   }
 
   async applyRemote(staging, conflictChoices = {}) {
-    const local = await localDb.loadWorkspace();
+    const local = await localDb.loadWorkspace(true);
     for (const entity of DATA_SOURCE_KEYS) {
       const localByPage = new Map(local[entity].filter(record => record.notionPageId).map(record => [record.notionPageId, record]));
       const merged = [];
@@ -184,12 +187,15 @@ class SyncCoordinator {
   async buildProperties(entity, record, connection, workspace, includePhotos = false) {
     const ids = connection.propertyIds[entity];
     const pageId = localId => {
-      const target = [...workspace.majorCategories, ...workspace.subCategories, ...workspace.items].find(item => item.localId === localId);
+      const target = [...workspace.majorCategories, ...workspace.subCategories, ...workspace.statuses, ...workspace.items].find(item => item.localId === localId);
       return target?.notionPageId || null;
     };
     if (entity === ENTITY.MAJOR) return { [ids.name]: titleValue(record.name), [ids.sort]: { number: record.sort ?? 0 } };
     if (entity === ENTITY.SUB) return {
       [ids.name]: titleValue(record.name), [ids.major]: relationValue([pageId(record.majorLocalId)]), [ids.sort]: { number: record.sort ?? 0 }
+    };
+    if (entity === ENTITY.STATUS) return {
+      [ids.name]: titleValue(record.name), [ids.color]: selectValue(record.color || "gray"), [ids.sort]: { number: record.sort ?? 0 }
     };
     if (entity === ENTITY.ITEM) {
       const properties = {
@@ -197,7 +203,7 @@ class SyncCoordinator {
         [ids.source]: textValue(record.source), [ids.sub]: relationValue([pageId(record.subLocalId)]),
         [ids.price]: { number: record.price === "" || record.price == null ? null : Number(record.price) },
         [ids.currency]: selectValue(record.currency), [ids.quantity]: { number: Number(record.quantity ?? 1) },
-        [ids.status]: selectValue(record.status), [ids.entryType]: selectValue(record.entryType),
+        [ids.status]: relationValue([pageId(record.statusLocalId)]), [ids.entryType]: selectValue(record.entryType),
         [ids.directSource]: relationValue([pageId(record.directSourceLocalId)]), [ids.cuttingDate]: dateValue(record.cuttingDate)
       };
       if (includePhotos) {
@@ -215,7 +221,10 @@ class SyncCoordinator {
 
   dependencies(entity, record) {
     if (entity === ENTITY.SUB) return [{ entity: ENTITY.MAJOR, localId: record.majorLocalId }];
-    if (entity === ENTITY.ITEM) return [{ entity: ENTITY.SUB, localId: record.subLocalId }, { entity: ENTITY.ITEM, localId: record.directSourceLocalId }].filter(item => item.localId);
+    if (entity === ENTITY.ITEM) return [
+      { entity: ENTITY.SUB, localId: record.subLocalId }, { entity: ENTITY.STATUS, localId: record.statusLocalId },
+      { entity: ENTITY.ITEM, localId: record.directSourceLocalId }
+    ].filter(item => item.localId);
     if (entity === ENTITY.PAIRING) return [
       { entity: ENTITY.ITEM, localId: record.motherLocalId }, { entity: ENTITY.ITEM, localId: record.fatherLocalId },
       ...(record.childLocalIds || []).map(localId => ({ entity: ENTITY.ITEM, localId }))
@@ -227,20 +236,26 @@ class SyncCoordinator {
     const visitKey = `${entity}:${localId}`;
     if (visiting.has(visitKey)) throw new Error("检测到 Relation 循环，已停止上传。");
     visiting.add(visitKey);
-    let workspace = await localDb.loadWorkspace();
+    let workspace = await localDb.loadWorkspace(true);
     let record = workspace[entity].find(item => item.localId === localId);
     if (!record) throw new Error("找不到待上传的本地记录。");
     for (const dependency of this.dependencies(entity, record)) {
       const target = workspace[dependency.entity].find(item => item.localId === dependency.localId);
       if (target && !target.notionPageId) await this.uploadRecord(dependency.entity, dependency.localId, connection, { force, visiting });
     }
-    workspace = await localDb.loadWorkspace();
+    workspace = await localDb.loadWorkspace(true);
     record = workspace[entity].find(item => item.localId === localId);
     if (record.notionPageId && !force) {
       const remote = await notionApi.retrievePage(record.notionPageId);
       if (record.syncBase && remote.last_edited_time !== record.syncBase) {
         throw new NotionApiError(`“${record.name || "未命名记录"}”在 Notion 和本地都已变化，需要用户决定是否覆盖。`, { code: "local_remote_conflict", details: { remote, record } });
       }
+    }
+    if (record.deleted) {
+      if (record.notionPageId) await notionApi.archivePage(record.notionPageId);
+      await localDb.remove(entity, record.localId);
+      visiting.delete(visitKey);
+      return record;
     }
     let includePhotos = false;
     if (entity === ENTITY.ITEM) {
@@ -254,7 +269,7 @@ class SyncCoordinator {
         }
       }
       includePhotos = includePhotos || !record.notionPageId || Boolean(record.photosChanged);
-      workspace = await localDb.loadWorkspace();
+      workspace = await localDb.loadWorkspace(true);
     }
     const properties = await this.buildProperties(entity, record, connection, workspace, includePhotos);
     const page = record.notionPageId
