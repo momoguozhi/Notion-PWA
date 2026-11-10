@@ -39,7 +39,7 @@ function byId(entity, id) { return state.workspace[entity].find(record => record
 function majorForSub(subId) { const sub = byId(ENTITY.SUB, subId); return sub ? byId(ENTITY.MAJOR, sub.majorLocalId) : null; }
 function categoryLabel(item) { const sub = byId(ENTITY.SUB, item.subLocalId); const major = sub ? byId(ENTITY.MAJOR, sub.majorLocalId) : null; return [major?.name, sub?.name].filter(Boolean).join(" › "); }
 function formatPrice(item) { return item.price == null || item.price === "" ? "" : `${Number(item.price).toLocaleString("zh-CN")} ${item.currency || ""}`.trim(); }
-function notionLink(item) { return item.notionPageId ? `https://www.notion.so/${item.notionPageId.replace(/-/g, "")}` : ""; }
+function notionLink(item) { return item.notionPageUrl || ""; }
 
 function photoUrl(photo) {
   if (!photo) return "";
@@ -86,6 +86,8 @@ function filteredRecords() {
   const query = state.query.toLocaleLowerCase("zh-CN");
   return entityList().filter(record => {
     if (state.entity === ENTITY.ITEM) {
+      if (state.selectedSubId && record.subLocalId !== state.selectedSubId) return false;
+      if (!state.selectedSubId && state.selectedMajorId && majorForSub(record.subLocalId)?.localId !== state.selectedMajorId) return false;
       const text = [record.name, record.notionUniqueId, categoryLabel(record), record.source, record.status, record.entryType].join(" ").toLocaleLowerCase("zh-CN");
       return text.includes(query);
     }
@@ -141,8 +143,7 @@ function renderViews() {
   if (state.entity === ENTITY.ITEM) {
     table.innerHTML = renderItemTable(records);
     cards.innerHTML = records.map(record => itemCard(record)).join("");
-    const scoped = state.selectedSubId ? records.filter(record => record.subLocalId === state.selectedSubId) : records;
-    mobile.innerHTML = scoped.map(record => itemCard(record,true)).join("");
+    mobile.innerHTML = records.map(record => itemCard(record,true)).join("");
   } else {
     table.innerHTML = renderPairingTable(records);
     cards.innerHTML = records.map(pairingCard).join("");
@@ -300,7 +301,7 @@ function renderItemForm(item) {
     <label class="form-control">扦插日期<input name="cuttingDate" type="date" value="${escapeHtml(item?.cuttingDate||"")}"></label>
     <label class="form-control full">直接来源（最多一个）<select name="directSourceLocalId"><option value="">无</option>${itemOptions(item?.directSourceLocalId,item?.localId)}</select></label>
     <div class="form-control full"><span>照片（最多 5 张，第一张为主图）</span><label class="photo-picker"><input id="record-photo-input" type="file" accept="image/*,.heic,.heif" multiple>选择照片</label><div id="record-photo-strip" class="photo-strip">${renderPhotoDraft()}</div></div>
-    ${item?.notionPageId?`<div class="form-control full qr-panel"><span>正式 Notion 页面二维码</span>${qrSvg(notionLink(item))}<a href="${escapeHtml(notionLink(item))}" target="_blank" rel="noreferrer">打开 Notion 页面</a></div>`:""}
+    ${item?.notionPageUrl?`<div class="form-control full qr-panel"><span>正式 Notion 页面二维码</span>${qrSvg(notionLink(item))}<a href="${escapeHtml(notionLink(item))}" target="_blank" rel="noreferrer">打开 Notion 页面</a></div>`:""}
   </div>`;
 }
 

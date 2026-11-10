@@ -29,6 +29,7 @@ function remoteIdentity(page, entity, existing) {
     localId: existing?.localId || crypto.randomUUID(),
     entity,
     notionPageId: page.id,
+    notionPageUrl: page.url || existing?.notionPageUrl || null,
     notionUniqueId: existing?.notionUniqueId || null,
     dirty: false,
     pending: false,
@@ -261,6 +262,7 @@ class SyncCoordinator {
       : await notionApi.createPage(connection.dataSourceIds[entity], properties);
     const ids = connection.propertyIds[entity];
     record.notionPageId = page.id;
+    record.notionPageUrl = page.url || record.notionPageUrl || null;
     if (entity === ENTITY.ITEM) record.notionUniqueId = read(page, ids.uniqueId, "unique_id");
     record.dirty = false; record.pending = false; record.uploadError = null;
     record.lastRemoteEdit = page.last_edited_time; record.syncBase = page.last_edited_time;

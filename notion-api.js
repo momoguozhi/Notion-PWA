@@ -16,7 +16,7 @@ export class NotionApiError extends Error {
 function errorMessage(status, code, fallback) {
   if (status === 401 || code === "unauthorized") return "Notion Integration Token 无效或已撤销。";
   if (status === 403 || code === "restricted_resource") return "Integration 没有访问该 Page 或 Database 的权限，请先在 Notion 中授权。";
-  if (status === 404 || code === "object_not_found") return "指定的 Notion Page／Database 不存在，请核对 URL 或 ID。";
+  if (status === 404 || code === "object_not_found") return "找不到指定的 Notion 资源，或当前 Integration 没有访问权限。请确认 URL / ID 以及 Notion 中的 Connection 授权。";
   if (status === 409 || code === "conflict_error") return "Notion 返回冲突，请刷新远程状态后再决定如何处理。";
   if (status === 429 || code === "rate_limited") return "Notion API 请求过于频繁，请稍后重试。";
   return fallback || `Notion API 请求失败（${status || "网络错误"}）。`;
