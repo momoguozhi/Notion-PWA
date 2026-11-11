@@ -1,4 +1,4 @@
-import { APP_SCHEMA, DATA_SOURCE_KEYS, NOTION_VERSION, baseProperties, relationProperties } from "./schema.js";
+import { APP_SCHEMA, DATA_SOURCE_KEYS, NOTION_VERSION, SCHEMA_VERSION, baseProperties, relationProperties } from "./schema.js";
 import { credentials } from "./credentials.js";
 
 const DEFAULT_API_BASE = "https://api.notion.com/v1";
@@ -23,10 +23,13 @@ function errorMessage(status, code, fallback) {
 }
 
 export function extractNotionId(input) {
-  const compact = String(input || "").trim().replace(/-/g, "");
-  const match = compact.match(/[0-9a-f]{32}/i);
-  if (!match) throw new Error("无法从输入内容识别 Notion ID。");
-  const id = match[0].toLowerCase();
+  const text = String(input || "").trim();
+  const standard = /(?:^|[^0-9a-f])([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?=$|[^0-9a-f])/ig;
+  const compact = /(?:^|[^0-9a-f])([0-9a-f]{32})(?=$|[^0-9a-f])/ig;
+  const matches = [...text.matchAll(standard), ...text.matchAll(compact)].sort((a, b) => a.index - b.index);
+  const raw = matches.at(-1)?.[1];
+  if (!raw) throw new Error("无法从输入内容识别 Notion ID。");
+  const id = raw.replace(/-/g, "").toLowerCase();
   return `${id.slice(0,8)}-${id.slice(8,12)}-${id.slice(12,16)}-${id.slice(16,20)}-${id.slice(20)}`;
 }
 
@@ -167,7 +170,7 @@ class NotionApiAdapter {
       if (matches.length !== 1) missing.push(`${expected}（找到 ${matches.length} 个）`);
       else dataSourceIds[entityKey] = matches[0].id;
     }
-    if (missing.length) throw new NotionApiError(`不是符合 v0.3 的 PWA Database：${missing.join("、")}`, { code: "schema_mismatch", details: missing });
+    if (missing.length) throw new NotionApiError(`不是符合当前 PWA 必需 Schema 的 Database：${missing.join("、")}`, { code: "schema_mismatch", details: missing });
     return this.buildConnection(databaseId, dataSourceIds, database.url || String(databaseInput));
   }
 
@@ -200,7 +203,7 @@ class NotionApiAdapter {
     if (mismatches.length) throw new NotionApiError(`远程 Schema 不匹配，已停止连接：${mismatches.join("；")}`, { code: "schema_mismatch", details: mismatches });
     return {
       databaseId, databaseUrl, dataSourceIds, propertyIds,
-      notionVersion: NOTION_VERSION, schemaVersion: 3,
+      notionVersion: NOTION_VERSION, schemaVersion: SCHEMA_VERSION,
       connectedAt: new Date().toISOString()
     };
   }

@@ -45,9 +45,8 @@ function mapRemotePage(entity, page, connection, existing, workspaceId) {
     acquisitionDate: read(page, ids.acquisitionDate, "date"), source: read(page, ids.source, "rich_text"),
     subPageId: read(page, ids.sub, "relation")[0] || null, subLocalId: null,
     price: read(page, ids.price, "number"), currency: read(page, ids.currency, "select") || "JPY",
-    quantity: read(page, ids.quantity, "number") ?? 1, status: read(page, ids.status, "select") || "在库",
-    entryType: read(page, ids.entryType, "select") || "成品", remoteFiles: read(page, ids.photos, "files"), photoIds: [],
-    directSourcePageId: read(page, ids.directSource, "relation")[0] || null, directSourceLocalId: null,
+    quantity: read(page, ids.quantity, "number") ?? 1,
+    remoteFiles: read(page, ids.photos, "files"), photoIds: [],
     cuttingDate: read(page, ids.cuttingDate, "date")
   };
   return {
@@ -74,54 +73,65 @@ function addRemotePhotos(staging, workspaceId) {
   });
 }
 
-function resolveFinalRelations(workspace, existingByLocalId = new Map()) {
+export function resolveFinalRelations(workspace, remoteSelections) {
   const maps = Object.fromEntries(DATA_SOURCE_KEYS.map(entity => [entity, new Map(workspace[entity].filter(record => record.notionPageId).map(record => [record.notionPageId, record.localId]))]));
-  const resolveOne = (record, pageId, entity, previousField, label) => {
-    if (!pageId) return null;
+  const localIds = Object.fromEntries(DATA_SOURCE_KEYS.map(entity => [entity, new Set(workspace[entity].map(record => record.localId))]));
+  const resolveOne = (pageId, entity, label, required = true) => {
+    if (!pageId) {
+      if (required) throw new Error(`Refresh 返回的${label} Relation 为空，已停止应用。`);
+      return null;
+    }
     const resolved = maps[entity].get(pageId);
     if (resolved) return resolved;
-    const previous = existingByLocalId.get(record.localId)?.[previousField];
-    if (previous && workspace[entity].some(target => target.localId === previous)) return previous;
     throw new Error(`Refresh 无法在当前 Workspace 解析${label} Relation，已停止应用。`);
   };
+  const validateLocal = (localId, entity, label, required = true) => {
+    if (!localId) {
+      if (required) throw new Error(`本地${label} Relation 为空，已停止应用。`);
+      return;
+    }
+    if (!localIds[entity].has(localId)) throw new Error(`本地${label} Relation 不属于当前最终 Workspace，已停止应用。`);
+  };
   workspace.subCategories.forEach(record => {
-    if ("majorPageId" in record) record.majorLocalId = resolveOne(record, record.majorPageId, ENTITY.MAJOR, "majorLocalId", "大分类");
+    if (remoteSelections[ENTITY.SUB].has(record.localId)) record.majorLocalId = resolveOne(record.majorPageId, ENTITY.MAJOR, "大分类");
+    else validateLocal(record.majorLocalId, ENTITY.MAJOR, "大分类");
   });
   workspace.items.forEach(record => {
-    if ("subPageId" in record) record.subLocalId = resolveOne(record, record.subPageId, ENTITY.SUB, "subLocalId", "小分类");
-    if ("directSourcePageId" in record) record.directSourceLocalId = resolveOne(record, record.directSourcePageId, ENTITY.ITEM, "directSourceLocalId", "直接来源");
+    if (remoteSelections[ENTITY.ITEM].has(record.localId)) record.subLocalId = resolveOne(record.subPageId, ENTITY.SUB, "小分类");
+    else validateLocal(record.subLocalId, ENTITY.SUB, "小分类");
   });
   workspace.pairings.forEach(record => {
-    if ("motherPageId" in record) record.motherLocalId = resolveOne(record, record.motherPageId, ENTITY.ITEM, "motherLocalId", "母本");
-    if ("fatherPageId" in record) record.fatherLocalId = resolveOne(record, record.fatherPageId, ENTITY.ITEM, "fatherLocalId", "父本");
-    if ("childPageIds" in record) {
-      const previous = existingByLocalId.get(record.localId)?.childLocalIds || [];
-      record.childLocalIds = record.childPageIds.map((pageId, index) => {
-        const resolved = maps[ENTITY.ITEM].get(pageId);
-        if (resolved) return resolved;
-        const prior = previous[index];
-        if (prior && workspace.items.some(target => target.localId === prior)) return prior;
-        throw new Error("Refresh 无法在当前 Workspace 解析子代 Relation，已停止应用。");
-      });
+    if (remoteSelections[ENTITY.PAIRING].has(record.localId)) {
+      record.motherLocalId = resolveOne(record.motherPageId, ENTITY.ITEM, "母本");
+      record.fatherLocalId = resolveOne(record.fatherPageId, ENTITY.ITEM, "父本");
+      record.childLocalIds = (record.childPageIds || []).map(pageId => resolveOne(pageId, ENTITY.ITEM, "子代"));
+    } else {
+      validateLocal(record.motherLocalId, ENTITY.ITEM, "母本");
+      validateLocal(record.fatherLocalId, ENTITY.ITEM, "父本");
+      (record.childLocalIds || []).forEach(localId => validateLocal(localId, ENTITY.ITEM, "子代"));
     }
   });
+}
+
+export function mergeEntityRecords(localRecords, remoteRecords, conflictChoices = {}) {
+  const localByPage = new Map(localRecords.filter(record => record.notionPageId).map(record => [record.notionPageId, record]));
+  const seen = new Set();
+  const records = [];
+  const remoteSelectedIds = new Set();
+  remoteRecords.forEach(remote => {
+    const current = localByPage.get(remote.notionPageId);
+    seen.add(remote.notionPageId);
+    if (current && (current.dirty || current.pending) && conflictChoices[current.localId] !== "remote") records.push(current);
+    else { records.push(remote); remoteSelectedIds.add(remote.localId); }
+  });
+  localRecords.filter(record => !record.notionPageId || !seen.has(record.notionPageId)).forEach(record => records.push(record));
+  return { records, remoteSelectedIds };
 }
 
 function recordChanged(local, remote) { return !local || local.lastRemoteEdit !== remote.lastRemoteEdit; }
 function guardContext(connection, context) {
   if (!context?.workspaceId || context.workspaceId !== connection.databaseId) throw new Error("同步操作缺少有效 Workspace 会话。");
   context.assertCurrent();
-}
-
-export function wouldCreateSourceCycle(itemId, sourceId, items) {
-  if (!sourceId) return false;
-  const byId = new Map(items.map(item => [item.localId, item]));
-  let cursor = sourceId; const visited = new Set();
-  while (cursor) {
-    if (cursor === itemId || visited.has(cursor)) return true;
-    visited.add(cursor); cursor = byId.get(cursor)?.directSourceLocalId || null;
-  }
-  return false;
 }
 
 class SyncCoordinator {
@@ -162,18 +172,13 @@ class SyncCoordinator {
     const staging = draft.staging;
     const local = await localDb.loadWorkspace(context.workspaceId);
     const final = { majorCategories: [], subCategories: [], items: [], pairings: [], photos: [] };
-    const existingByLocalId = new Map(DATA_SOURCE_KEYS.flatMap(entity => local[entity]).map(record => [record.localId, record]));
+    const remoteSelections = Object.fromEntries(DATA_SOURCE_KEYS.map(entity => [entity, new Set()]));
     for (const entity of DATA_SOURCE_KEYS) {
-      const localByPage = new Map(local[entity].filter(record => record.notionPageId).map(record => [record.notionPageId, record]));
-      const seen = new Set();
-      staging[entity].forEach(remote => {
-        const current = localByPage.get(remote.notionPageId); seen.add(remote.notionPageId);
-        if (current && (current.dirty || current.pending) && conflictChoices[current.localId] !== "remote") final[entity].push(current);
-        else final[entity].push(remote);
-      });
-      local[entity].filter(record => !record.notionPageId || !seen.has(record.notionPageId)).forEach(record => final[entity].push(record));
+      const merged = mergeEntityRecords(local[entity], staging[entity], conflictChoices);
+      final[entity] = merged.records;
+      remoteSelections[entity] = merged.remoteSelectedIds;
     }
-    resolveFinalRelations(final, existingByLocalId);
+    resolveFinalRelations(final, remoteSelections);
     const requiredPhotoIds = new Set(final.items.flatMap(item => item.photoIds || []));
     const availablePhotos = new Map([...local.photos, ...staging.photos].map(photo => [photo.localId, photo]));
     final.photos = [...requiredPhotoIds].map(id => availablePhotos.get(id)).filter(Boolean);
@@ -201,8 +206,6 @@ class SyncCoordinator {
         [ids.sub]: relationValue(record.subLocalId ? [pageId(ENTITY.SUB, record.subLocalId, "小分类")] : []),
         [ids.price]: { number: record.price === "" || record.price == null ? null : Number(record.price) },
         [ids.currency]: selectValue(record.currency), [ids.quantity]: { number: Number(record.quantity ?? 1) },
-        [ids.status]: selectValue(record.status), [ids.entryType]: selectValue(record.entryType),
-        [ids.directSource]: relationValue(record.directSourceLocalId ? [pageId(ENTITY.ITEM, record.directSourceLocalId, "直接来源")] : []),
         [ids.cuttingDate]: dateValue(record.cuttingDate)
       };
       if (includePhotos) {
@@ -222,7 +225,7 @@ class SyncCoordinator {
 
   dependencies(entity, record) {
     if (entity === ENTITY.SUB) return record.majorLocalId ? [{ entity: ENTITY.MAJOR, localId: record.majorLocalId }] : [];
-    if (entity === ENTITY.ITEM) return [{ entity: ENTITY.SUB, localId: record.subLocalId }, { entity: ENTITY.ITEM, localId: record.directSourceLocalId }].filter(item => item.localId);
+    if (entity === ENTITY.ITEM) return record.subLocalId ? [{ entity: ENTITY.SUB, localId: record.subLocalId }] : [];
     if (entity === ENTITY.PAIRING) return [{ entity: ENTITY.ITEM, localId: record.motherLocalId }, { entity: ENTITY.ITEM, localId: record.fatherLocalId }, ...(record.childLocalIds || []).map(localId => ({ entity: ENTITY.ITEM, localId }))].filter(item => item.localId);
     return [];
   }

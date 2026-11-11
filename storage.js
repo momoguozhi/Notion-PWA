@@ -187,7 +187,10 @@ class LocalDatabase {
     await this.put("connectionConfig", { ...config, localId: "active", schemaVersion: SCHEMA_VERSION });
   }
 
-  async getConnection() { return this.get("connectionConfig", "active"); }
+  async getConnection() {
+    const config = await this.get("connectionConfig", "active");
+    return config ? { ...config, schemaVersion: SCHEMA_VERSION } : null;
+  }
 
   async hasPending(workspaceId = this.workspaceId) {
     if (!workspaceId) return false;

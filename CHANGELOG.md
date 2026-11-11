@@ -1,5 +1,15 @@
 # 版本更新记录
 
+## v0.4.3 — 2026-11-11
+- 修正通用 Notion URL／UUID 提取，支持带标题的页面 URL、纯紧凑 ID 与标准 UUID，避免标题中的十六进制字符污染目标 ID。
+- 从当前具体资料业务 Schema、表单、显示、搜索、Refresh 和 Upload 映射中移除旧状态、旧录入类型与旧直接来源；普通来源、扦插日期及配对记录保留。
+- 修复 Refresh Relation 合并：保留 local 时不再被残留远程 Page ID 覆盖；采用 remote 时按最终 Workspace 的 Page ID 精确解析，非空目标无法解析即停止，数组不再按位置回退，合法空子代仍可应用。
+- 增加具体资料“大分类 → 小分类”级联选择与表单内分类补建；增加小分类改挂大分类，保持原 localId／Notion Page 身份，所有分类修改只保存本地并标记待上传。
+- 无 active Database 时禁用或阻止业务新增、分类管理、刷新与上传；Token 配置提供明确关闭入口，Token、创建、连接和恢复错误显示在当前弹窗内。
+- 页面版本和 Service Worker Cache 命名空间更新为 v0.4.3；请求及离线 fallback 只查询当前 Cache，继续沿用 `notion-pwa-v041` IndexedDB。
+- 调整手机输入字号、动态 viewport、弹窗滚动与底部操作、分类导航高度、图片比例和长文本约束；未执行真实 iPhone 或其他设备实测。
+- 最低检查：8 个 JavaScript 文件通过 `node --check`；4 种 Notion ID 输入、废弃字段清理及 4 个 Refresh Relation 场景通过本地无网络函数级断言。未执行浏览器、真实 Notion、Windows 或 iPhone 实机验证。
+
 ## v0.4.2 — 2026-11-11
 - 修复同库重连、换库或断开进入本地提交阶段后，旧 Refresh、Upload、照片及记录写入仍可能排在连接事务之后重新写回 Workspace 的竞态：旧 session 先失效，Workspace 写入和连接切换共用串行提交 gate。
 - 保持连接事务失败时原 active connection 与 Workspace 不丢失，并为原连接建立新的可用 session；已失效旧 session 仍不能继续提交。

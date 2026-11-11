@@ -1,5 +1,6 @@
 export const NOTION_VERSION = "2026-03-11";
-export const SCHEMA_VERSION = 3;
+// Remote business schema version. This is independent from the app and IndexedDB versions.
+export const SCHEMA_VERSION = 4;
 
 export const ENTITY = Object.freeze({
   MAJOR: "majorCategories",
@@ -37,10 +38,7 @@ export const APP_SCHEMA = Object.freeze({
       price: { name: "价格", type: "number", schema: { number: { format: "number" } } },
       currency: { name: "货币", type: "select", schema: { select: { options: ["JPY", "CNY", "USD"].map(name => ({ name })) } } },
       quantity: { name: "数量", type: "number", schema: { number: { format: "number" } } },
-      status: { name: "状态", type: "select", schema: { select: { options: ["在库", "培育中", "已售出", "已枯失", "其他"].map(name => ({ name })) } } },
-      entryType: { name: "录入类型", type: "select", schema: { select: { options: ["播种苗", "成品"].map(name => ({ name })) } } },
       photos: { name: "照片", type: "files", schema: { files: {} } },
-      directSource: { name: "直接来源", type: "relation", target: ENTITY.ITEM },
       cuttingDate: { name: "扦插日期", type: "date", schema: { date: {} } }
     }
   },
@@ -62,9 +60,7 @@ export const ITEM_DISPLAY_FIELDS = Object.freeze([
   { key: "notionUniqueId", label: "编号" },
   { key: "category", label: "分类" },
   { key: "price", label: "价格" },
-  { key: "status", label: "状态" },
   { key: "quantity", label: "数量" },
-  { key: "entryType", label: "录入类型" },
   { key: "acquisitionDate", label: "入手日期" },
   { key: "source", label: "来源" }
 ]);
@@ -73,7 +69,7 @@ export const DEFAULT_DISPLAY_PREFERENCES = Object.freeze({
   mobileColumns: 4,
   desktopColumns: 5,
   desktopView: "table",
-  fields: ["name", "notionUniqueId", "status"],
+  fields: ["name", "notionUniqueId", "category"],
   fieldOrder: ITEM_DISPLAY_FIELDS.map(field => field.key)
 });
 
@@ -113,4 +109,10 @@ export function createLocalRecord(entity, values = {}) {
     entity,
     ...values
   };
+}
+
+export function stripDeprecatedItemFields(record) {
+  const cleaned = { ...record };
+  ["status", "entryType", "directSource", "directSourceLocalId", "directSourcePageId"].forEach(key => delete cleaned[key]);
+  return cleaned;
 }

@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="theme-color" content="#202124">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="记录台">
@@ -14,7 +14,7 @@
 </head>
 <body>
   <header class="app-header">
-    <div class="brand"><span class="brand-mark">N</span><div><strong>记录台</strong><small>Notion 本地优先 PWA · v0.4.2</small></div></div>
+    <div class="brand"><span class="brand-mark">N</span><div><strong>记录台</strong><small>Notion 本地优先 PWA · v0.4.3</small></div></div>
     <nav class="entity-tabs" aria-label="资料类型">
       <button class="entity-tab active" data-entity="items">具体资料 <span id="item-count">0</span></button>
       <button class="entity-tab" data-entity="pairings">配对记录 <span id="pairing-count">0</span></button>
@@ -60,7 +60,7 @@
   </main>
 
   <dialog id="onboarding-dialog" class="onboarding-dialog">
-    <div class="dialog-header"><div><small>本设备首次配置</small><h2 id="onboarding-title">配置 Notion Integration Token</h2></div></div>
+    <div class="dialog-header"><div><small>本设备配置</small><h2 id="onboarding-title">配置 Notion Integration Token</h2></div><button type="button" class="icon-button close-onboarding" aria-label="关闭">×</button></div>
     <div id="onboarding-body" class="dialog-body"></div>
   </dialog>
 
@@ -70,7 +70,7 @@
       <div class="dialog-body settings-body">
         <section><h3>当前 PWA Database</h3><div id="connection-details" class="details-box"></div></section>
         <section><h3>Notion Integration Token</h3><p>Token 使用用户口令经 PBKDF2 派生密钥后，以 AES-GCM 密文保存于本机 IndexedDB；口令和解密密钥不会持久化。</p><button type="button" id="update-token">更新／重新输入 Token</button><button type="button" id="unlock-token">解锁凭证</button></section>
-        <section><h3>连接操作</h3><button type="button" id="create-new-database">创建新的 PWA Database</button><button type="button" id="reconnect-database">重新连接／更换 Database</button><button type="button" id="disconnect-database" class="danger">断开当前 Database</button><p class="muted">成功创建、重连或更换会删除当前 V0.4.1 本地 Workspace；断开也使用同一规则。加密 Token 与远程数据不会被删除。</p></section>
+        <section><h3>连接操作</h3><button type="button" id="create-new-database">创建新的 PWA Database</button><button type="button" id="reconnect-database">重新连接／更换 Database</button><button type="button" id="disconnect-database" class="danger">断开当前 Database</button><p class="muted">成功创建、重连或更换会删除当前 Database 的本地 Workspace；断开也使用同一规则。加密 Token 与远程数据不会被删除。</p></section>
       </div>
       <footer class="dialog-footer"><span class="footer-spacer"></span><button type="button" class="close-settings">完成</button></footer>
     </form>
