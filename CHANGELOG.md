@@ -1,4 +1,12 @@
-# 版本更新记录 
+# 版本更新记录
+
+## v0.4.2 — 2026-11-11
+- 修复同库重连、换库或断开进入本地提交阶段后，旧 Refresh、Upload、照片及记录写入仍可能排在连接事务之后重新写回 Workspace 的竞态：旧 session 先失效，Workspace 写入和连接切换共用串行提交 gate。
+- 保持连接事务失败时原 active connection 与 Workspace 不丢失，并为原连接建立新的可用 session；已失效旧 session 仍不能继续提交。
+- 发现唯一 `initialization-recovery` 时，用户取消恢复会直接结束本次创建，不删除恢复点，也不调用新 Database 创建流程。
+- Service Worker 改为只打开并查询 V0.4.2 当前 Cache；请求与离线 `index.html` fallback 均不再使用跨 Cache 的全局 `caches.match()`。
+- 页面版本与 Cache 前缀更新为 V0.4.2；继续沿用 V0.4.1 的 `notion-pwa-v041` IndexedDB、Workspace 数据结构和 migration flag，不执行新业务数据迁移。
+- 最低检查：`storage.js`、`sync.js`、`app.js`、`sw.js` 已通过 `node --check`；未执行浏览器、真实 Notion、Windows 或 iPhone 实机验证。
 
 ## v0.4.1 — 2026-11-11
 - 基于 `v0.3` 修复，不继承 `v0.4`；使用独立的 IndexedDB、localStorage、迁移标记和 Service Worker Cache 命名空间。

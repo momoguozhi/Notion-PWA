@@ -45,7 +45,13 @@ function replaceMatching(store, predicate, values) {
 }
 
 class LocalDatabase {
-  constructor() { this.db = null; this.workspaceId = null; }
+  constructor() {
+    this.db = null;
+    this.workspaceId = null;
+    this.activeSessionId = null;
+    this.writeTail = Promise.resolve();
+    this.switchInProgress = false;
+  }
 
   async open() {
     if (this.db) return this.db;
@@ -64,6 +70,28 @@ class LocalDatabase {
   }
 
   setWorkspace(workspaceId) { this.workspaceId = workspaceId || null; }
+  setActiveSession(sessionId) { this.activeSessionId = sessionId || null; }
+
+  queueWorkspaceWrite(sessionId, operation) {
+    const expectedSessionId = sessionId || this.activeSessionId;
+    if (this.switchInProgress) return Promise.reject(new Error("连接切换正在提交，当前 Workspace 写入已取消。"));
+    const run = async () => {
+      if (!expectedSessionId || expectedSessionId !== this.activeSessionId) {
+        throw new Error("连接会话已失效，旧异步写入已取消。");
+      }
+      return operation();
+    };
+    const result = this.writeTail.then(run, run);
+    this.writeTail = result.catch(() => {});
+    return result;
+  }
+
+  queueExclusiveWrite(operation) {
+    const result = this.writeTail.then(operation, operation);
+    this.writeTail = result.catch(() => {});
+    return result;
+  }
+
   requireWorkspace(workspaceId = this.workspaceId) {
     if (!workspaceId) throw new Error("当前没有 active Database Workspace。");
     return workspaceId;
@@ -94,20 +122,25 @@ class LocalDatabase {
     return values.filter(value => value.workspaceId === active);
   }
 
-  async put(name, value, workspaceId = this.workspaceId) {
+  async put(name, value, workspaceId = this.workspaceId, sessionId = this.activeSessionId) {
     let stored = value;
     if (BUSINESS_STORES.includes(name)) {
       const active = this.requireWorkspace(workspaceId);
       if (value.workspaceId && value.workspaceId !== active) throw new Error("已阻止跨 Workspace 写入本地业务数据。");
       stored = { ...value, workspaceId: active };
+      return this.queueWorkspaceWrite(sessionId, () => this.request(this.store(name, "readwrite").put(stored)));
     }
     return this.request(this.store(name, "readwrite").put(stored));
   }
 
-  async remove(name, localId, workspaceId = this.workspaceId) {
+  async remove(name, localId, workspaceId = this.workspaceId, sessionId = this.activeSessionId) {
     if (BUSINESS_STORES.includes(name)) {
-      const existing = await this.request(this.store(name).get(localId));
-      if (!existing || existing.workspaceId !== this.requireWorkspace(workspaceId)) return;
+      const active = this.requireWorkspace(workspaceId);
+      return this.queueWorkspaceWrite(sessionId, async () => {
+        const existing = await this.request(this.store(name).get(localId));
+        if (!existing || existing.workspaceId !== active) return;
+        return this.request(this.store(name, "readwrite").delete(localId));
+      });
     }
     return this.request(this.store(name, "readwrite").delete(localId));
   }
@@ -121,29 +154,33 @@ class LocalDatabase {
     return { majorCategories, subCategories, items, pairings, photos };
   }
 
-  async replaceWorkspaceStore(name, values, workspaceId = this.workspaceId) {
+  async replaceWorkspaceStore(name, values, workspaceId = this.workspaceId, sessionId = this.activeSessionId) {
     const active = this.requireWorkspace(workspaceId);
     if (!BUSINESS_STORES.includes(name)) throw new Error("replaceWorkspaceStore 只允许业务 store。");
-    const transaction = this.db.transaction(name, "readwrite");
-    const done = transactionDone(transaction);
-    const store = transaction.objectStore(name);
-    await replaceMatching(store, value => value.workspaceId === active, values.map(value => ({ ...value, workspaceId: active })));
-    await done;
+    return this.queueWorkspaceWrite(sessionId, async () => {
+      const transaction = this.db.transaction(name, "readwrite");
+      const done = transactionDone(transaction);
+      const store = transaction.objectStore(name);
+      await replaceMatching(store, value => value.workspaceId === active, values.map(value => ({ ...value, workspaceId: active })));
+      await done;
+    });
   }
 
-  async applyRefreshWorkspace(workspace, workspaceId = this.workspaceId) {
+  async applyRefreshWorkspace(workspace, workspaceId = this.workspaceId, sessionId = this.activeSessionId) {
     const active = this.requireWorkspace(workspaceId);
-    const transaction = this.db.transaction([...BUSINESS_STORES, "syncMeta", "staging"], "readwrite");
-    const done = transactionDone(transaction);
-    const replacements = BUSINESS_STORES.map(name => replaceMatching(
-      transaction.objectStore(name),
-      value => value.workspaceId === active,
-      (workspace[name] || []).map(value => ({ ...value, workspaceId: active }))
-    ));
-    transaction.objectStore("syncMeta").put({ localId: `${active}:last-refresh`, workspaceId: active, key: "last-refresh", completedAt: new Date().toISOString() });
-    transaction.objectStore("staging").delete(`remote-refresh:${active}`);
-    await Promise.all(replacements);
-    await done;
+    return this.queueWorkspaceWrite(sessionId, async () => {
+      const transaction = this.db.transaction([...BUSINESS_STORES, "syncMeta", "staging"], "readwrite");
+      const done = transactionDone(transaction);
+      const replacements = BUSINESS_STORES.map(name => replaceMatching(
+        transaction.objectStore(name),
+        value => value.workspaceId === active,
+        (workspace[name] || []).map(value => ({ ...value, workspaceId: active }))
+      ));
+      transaction.objectStore("syncMeta").put({ localId: `${active}:last-refresh`, workspaceId: active, key: "last-refresh", completedAt: new Date().toISOString() });
+      transaction.objectStore("staging").delete(`remote-refresh:${active}`);
+      await Promise.all(replacements);
+      await done;
+    });
   }
 
   async saveConnection(config) {
@@ -159,25 +196,33 @@ class LocalDatabase {
       .some(record => record.dirty || record.pending);
   }
 
-  async commitConnectionSwitch(oldWorkspaceId, newConnection) {
-    const transaction = this.db.transaction([...BUSINESS_STORES, "syncMeta", "staging", "connectionConfig"], "readwrite");
-    const done = transactionDone(transaction);
-    const deletes = [];
-    if (oldWorkspaceId) {
-      for (const name of BUSINESS_STORES) deletes.push(deleteMatching(transaction.objectStore(name), value => value.workspaceId === oldWorkspaceId));
-      deletes.push(deleteMatching(transaction.objectStore("syncMeta"), value => value.workspaceId === oldWorkspaceId));
-      deletes.push(deleteMatching(transaction.objectStore("staging"), value => value.type === "remote-refresh" && value.workspaceId === oldWorkspaceId));
-    }
-    const connectionStore = transaction.objectStore("connectionConfig");
-    if (newConnection) connectionStore.put({ ...newConnection, localId: "active", schemaVersion: SCHEMA_VERSION });
-    else connectionStore.delete("active");
-    await Promise.all(deletes);
-    await done;
+  async commitConnectionSwitch(oldWorkspaceId, newConnection, nextSessionId) {
+    this.setActiveSession(nextSessionId);
+    this.switchInProgress = true;
+    return this.queueExclusiveWrite(async () => {
+      try {
+        const transaction = this.db.transaction([...BUSINESS_STORES, "syncMeta", "staging", "connectionConfig"], "readwrite");
+        const done = transactionDone(transaction);
+        const deletes = [];
+        if (oldWorkspaceId) {
+          for (const name of BUSINESS_STORES) deletes.push(deleteMatching(transaction.objectStore(name), value => value.workspaceId === oldWorkspaceId));
+          deletes.push(deleteMatching(transaction.objectStore("syncMeta"), value => value.workspaceId === oldWorkspaceId));
+          deletes.push(deleteMatching(transaction.objectStore("staging"), value => value.type === "remote-refresh" && value.workspaceId === oldWorkspaceId));
+        }
+        const connectionStore = transaction.objectStore("connectionConfig");
+        if (newConnection) connectionStore.put({ ...newConnection, localId: "active", schemaVersion: SCHEMA_VERSION });
+        else connectionStore.delete("active");
+        await Promise.all(deletes);
+        await done;
+      } finally {
+        this.switchInProgress = false;
+      }
+    });
   }
 
-  async setSyncMeta(key, value, workspaceId = this.workspaceId) {
+  async setSyncMeta(key, value, workspaceId = this.workspaceId, sessionId = this.activeSessionId) {
     const active = this.requireWorkspace(workspaceId);
-    await this.put("syncMeta", { localId: `${active}:${key}`, workspaceId: active, key, ...value });
+    await this.queueWorkspaceWrite(sessionId, () => this.request(this.store("syncMeta", "readwrite").put({ localId: `${active}:${key}`, workspaceId: active, key, ...value })));
   }
 
   async getSyncMeta(key, workspaceId = this.workspaceId) {
@@ -185,14 +230,14 @@ class LocalDatabase {
     return this.get("syncMeta", `${active}:${key}`);
   }
 
-  async putRemoteRefresh(staging, summary, workspaceId = this.workspaceId) {
+  async putRemoteRefresh(staging, summary, workspaceId = this.workspaceId, sessionId = this.activeSessionId) {
     const active = this.requireWorkspace(workspaceId);
-    await this.put("staging", { localId: `remote-refresh:${active}`, type: "remote-refresh", workspaceId: active, staging, summary, fetchedAt: new Date().toISOString() });
+    await this.queueWorkspaceWrite(sessionId, () => this.request(this.store("staging", "readwrite").put({ localId: `remote-refresh:${active}`, type: "remote-refresh", workspaceId: active, staging, summary, fetchedAt: new Date().toISOString() })));
   }
 
-  async removeRemoteRefresh(workspaceId = this.workspaceId) {
+  async removeRemoteRefresh(workspaceId = this.workspaceId, sessionId = this.activeSessionId) {
     const active = this.requireWorkspace(workspaceId);
-    await this.remove("staging", `remote-refresh:${active}`);
+    await this.queueWorkspaceWrite(sessionId, () => this.request(this.store("staging", "readwrite").delete(`remote-refresh:${active}`)));
   }
 
   initializationRecoveryId(databaseId) { return `initialization-recovery:${databaseId}`; }

@@ -78,6 +78,7 @@ async function reloadWorkspace() {
 }
 
 function captureSession() {
+  if (state.connectionBusy) throw new Error("连接切换正在提交，请稍后再操作。");
   const workspaceId = state.connection?.databaseId, sessionId = state.connectionSessionId;
   if (!workspaceId) throw new Error("当前没有 active Database。");
   return {
@@ -105,9 +106,17 @@ async function confirmWorkspaceRemoval(actionLabel) {
 
 async function commitConnectionSwitch(connection) {
   const oldWorkspaceId = state.connection?.databaseId || null;
-  await localDb.commitConnectionSwitch(oldWorkspaceId, connection);
+  const nextSessionId = crypto.randomUUID();
+  state.connectionSessionId = nextSessionId;
+  try {
+    await localDb.commitConnectionSwitch(oldWorkspaceId, connection, nextSessionId);
+  } catch (error) {
+    const recoverySessionId = crypto.randomUUID();
+    state.connectionSessionId = recoverySessionId;
+    localDb.setActiveSession(recoverySessionId);
+    throw error;
+  }
   state.connection = connection || null;
-  state.connectionSessionId = crypto.randomUUID();
   localDb.setWorkspace(connection?.databaseId || null);
   resetWorkspaceUi();
   await reloadWorkspace();
@@ -280,14 +289,22 @@ async function createDatabase() {
     onboardingProgress("准备初始化…");
     const recoveries = await localDb.getInitializationRecoveries();
     if (recoveries.length > 1) throw new Error("发现多个目标 Database 的初始化恢复点，目标身份不明确；请先使用“连接已有 Database”确认目标。");
-    const recovery = recoveries.length === 1 && confirm(`发现 Database ${recoveries[0].targetDatabaseId} 的未完成初始化。是否恢复，避免重复建库？`) ? recoveries[0] : null;
+    let recovery = null;
+    if (recoveries.length === 1) {
+      if (!confirm(`发现 Database ${recoveries[0].targetDatabaseId} 的未完成初始化。是否恢复，避免重复建库？`)) {
+        onboardingProgress("已取消恢复；未创建新的远程 Database，恢复点仍保留。");
+        if (state.connection) $("#onboarding-dialog").close();
+        return;
+      }
+      recovery = recoveries[0];
+    }
     const progress = async (message, partial) => {
       onboardingProgress(message);
       if (partial?.databaseId) await localDb.putInitializationRecovery(partial.databaseId, partial);
     };
-    const connection = recovery
-      ? await notionApi.resumeInitialization(recovery,progress)
-      : await notionApi.initializeDatabase($("#parent-page-input").value,progress);
+    let connection;
+    if (recovery) connection = await notionApi.resumeInitialization(recovery, progress);
+    else connection = await notionApi.initializeDatabase($("#parent-page-input").value, progress);
     await commitConnectionSwitch(connection);
     await localDb.removeInitializationRecovery(connection.databaseId);
     $("#onboarding-dialog").close(); setBanner("ok", "初始化完成；尚未上传任何本地业务记录"); renderSettings();
@@ -419,10 +436,10 @@ async function saveRecordLocal() {
       session.assertCurrent();
       const photo = { ...draftPhoto, order: index, itemLocalId: record.localId };
       if (photo.blob && !photo.fileUploadId) photo.pending = true;
-      await localDb.put("photos", photo, session.workspaceId);
+      await localDb.put("photos", photo, session.workspaceId, session.sessionId);
       oldIds.delete(photo.localId);
     }
-    for (const removedId of oldIds) { session.assertCurrent(); await localDb.remove("photos",removedId,session.workspaceId); }
+    for (const removedId of oldIds) { session.assertCurrent(); await localDb.remove("photos",removedId,session.workspaceId,session.sessionId); }
     if (!existing && state.photoDraft.length) record.photosChanged = true;
   } else {
     const values = Object.fromEntries(new FormData(form).entries());
@@ -435,7 +452,7 @@ async function saveRecordLocal() {
     });
   }
   record.dirty=true; record.pending=true; record.uploadError=null; record.updatedAt=new Date().toISOString();
-  session.assertCurrent(); await localDb.put(state.entity,record,session.workspaceId); state.editingId=record.localId;
+  session.assertCurrent(); await localDb.put(state.entity,record,session.workspaceId,session.sessionId); state.editingId=record.localId;
   await reloadWorkspace(); session.assertCurrent();
   const visible = filteredRecords().some(item => item.localId === record.localId);
   toast(visible ? "已保存到本机 IndexedDB；未自动上传" : `已保存到本机；当前筛选隐藏了该记录${state.entity===ENTITY.ITEM&&categoryLabel(record)?`（${categoryLabel(record)}）`:""}`, 4200);
@@ -457,7 +474,7 @@ async function uploadCurrent(record, force = false) {
   } catch (error) {
     try { context.assertCurrent(); } catch { return; }
     const failed = byId(state.entity, record.localId);
-    if (failed) { context.assertCurrent(); failed.uploadError = error.message; await localDb.put(state.entity, failed, context.workspaceId); }
+    if (failed) { context.assertCurrent(); failed.uploadError = error.message; await localDb.put(state.entity, failed, context.workspaceId, context.sessionId); }
     if (error.code === "local_remote_conflict" && confirm(`${error.message}\n\n确定以本地版本覆盖 Notion 吗？`)) return uploadCurrent(record,true);
     setBanner("error",error.message); toast(error.message,5000);
   }
@@ -566,7 +583,14 @@ $("#mobile-columns").addEventListener("change",event=>{state.preferences.mobileC
 $("#desktop-columns").addEventListener("change",event=>{state.preferences.desktopColumns=Number(event.target.value);savePreferences();render();});
 $("#record-form").addEventListener("submit",async event=>{event.preventDefault();const record=await saveRecordLocal();if(record)$("#record-dialog").close();});
 $("#save-upload").addEventListener("click",saveAndUpload);
-$("#delete-local").addEventListener("click",async()=>{const record=byId(state.entity,state.editingId);if(record?.notionPageId)return toast("已同步记录不能仅在本地删除；远程归档将在后续明确版本处理");if(record&&confirm("仅删除这条尚未上传的本地记录？")){if(state.entity===ENTITY.ITEM)for(const id of record.photoIds||[])await localDb.remove("photos",id);await localDb.remove(state.entity,record.localId);$("#record-dialog").close();await reloadWorkspace();}});
+$("#delete-local").addEventListener("click",async()=>{
+  const session=captureSession(),record=byId(state.entity,state.editingId);
+  if(record?.notionPageId)return toast("已同步记录不能仅在本地删除；远程归档将在后续明确版本处理");
+  if(record&&confirm("仅删除这条尚未上传的本地记录？")){
+    if(state.entity===ENTITY.ITEM)for(const id of record.photoIds||[]){session.assertCurrent();await localDb.remove("photos",id,session.workspaceId,session.sessionId);}
+    session.assertCurrent();await localDb.remove(state.entity,record.localId,session.workspaceId,session.sessionId);$("#record-dialog").close();await reloadWorkspace();
+  }
+});
 $("#apply-refresh").addEventListener("click",applyRefresh);
 $("#update-token").addEventListener("click",()=>{$("#settings-dialog").close();openOnboarding("token",{update:true});});
 $("#unlock-token").addEventListener("click",()=>{$("#settings-dialog").close();openOnboarding("unlock");});
@@ -581,7 +605,7 @@ $$('.close-refresh').forEach(button=>button.addEventListener('click',()=>$("#ref
 
 async function initialize() {
   try {
-    await localDb.open();
+    await localDb.open(); localDb.setActiveSession(state.connectionSessionId);
     if (!localStorage.getItem("notion-pwa-v041-migration-complete")) {
       try {
         const migration = await localDb.migrateLegacyConfiguration();

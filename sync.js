@@ -152,7 +152,7 @@ class SyncCoordinator {
       });
     }
     guardContext(connection, context);
-    await localDb.putRemoteRefresh(staging, summary, workspaceId);
+    await localDb.putRemoteRefresh(staging, summary, workspaceId, context.sessionId);
     return { staging, summary, workspaceId, sessionId: context.sessionId };
   }
 
@@ -178,7 +178,7 @@ class SyncCoordinator {
     const availablePhotos = new Map([...local.photos, ...staging.photos].map(photo => [photo.localId, photo]));
     final.photos = [...requiredPhotoIds].map(id => availablePhotos.get(id)).filter(Boolean);
     guardContext(connection, context);
-    await localDb.applyRefreshWorkspace(final, context.workspaceId);
+    await localDb.applyRefreshWorkspace(final, context.workspaceId, context.sessionId);
   }
 
   relationPageId(workspace, entity, localId, label, workspaceId) {
@@ -253,7 +253,7 @@ class SyncCoordinator {
       for (const photo of photos) {
         if (photo.blob && !photo.fileUploadId) {
           photo.fileUploadId = await notionApi.uploadFile(photo.blob); guardContext(connection, context);
-          photo.pending = true; await localDb.put("photos", photo, context.workspaceId); includePhotos = true;
+          photo.pending = true; await localDb.put("photos", photo, context.workspaceId, context.sessionId); includePhotos = true;
         }
       }
       includePhotos = includePhotos || !record.notionPageId || Boolean(record.photosChanged);
@@ -268,7 +268,7 @@ class SyncCoordinator {
     record.dirty = false; record.pending = false; record.uploadError = null;
     record.lastRemoteEdit = page.last_edited_time; record.syncBase = page.last_edited_time;
     record.updatedAt = new Date().toISOString(); record.photosChanged = false;
-    await localDb.put(entity, record, context.workspaceId); visiting.delete(visitKey); return record;
+    await localDb.put(entity, record, context.workspaceId, context.sessionId); visiting.delete(visitKey); return record;
   }
 
   async uploadPending(connection, context, onProgress = () => {}) {
@@ -280,7 +280,7 @@ class SyncCoordinator {
         guardContext(connection, context); onProgress(`正在上传 ${APP_SCHEMA[entity].title}：${record.name || "未命名"}`);
         try { await this.uploadRecord(entity, record.localId, connection, { context }); results.uploaded += 1; }
         catch (error) {
-          context.assertCurrent(); record.uploadError = error.message; await localDb.put(entity, record, context.workspaceId);
+          context.assertCurrent(); record.uploadError = error.message; await localDb.put(entity, record, context.workspaceId, context.sessionId);
           results.failed.push({ entity, localId: record.localId, name: record.name, error });
           if (error.code === "local_remote_conflict") return results;
         }

@@ -1,4 +1,4 @@
-const CACHE_PREFIX = "notion-pwa-v0.4.1-";
+const CACHE_PREFIX = "notion-pwa-v0.4.2-";
 const CACHE_NAME = `${CACHE_PREFIX}static-1`;
 const APP_SHELL = [
   "./",
@@ -28,11 +28,17 @@ self.addEventListener("activate", event => {
 
 self.addEventListener("fetch", event => {
   if (event.request.method !== "GET") return;
-  event.respondWith(caches.match(event.request).then(cached => cached || fetch(event.request).then(response => {
-    if (response.ok && new URL(event.request.url).origin === self.location.origin) {
-      const copy = response.clone();
-      caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
+  event.respondWith(caches.open(CACHE_NAME).then(async cache => {
+    const cached = await cache.match(event.request);
+    if (cached) return cached;
+    try {
+      const response = await fetch(event.request);
+      if (response.ok && new URL(event.request.url).origin === self.location.origin) {
+        await cache.put(event.request, response.clone());
+      }
+      return response;
+    } catch {
+      return cache.match("./index.html");
     }
-    return response;
-  }).catch(() => caches.match("./index.html"))));
+  }));
 });
