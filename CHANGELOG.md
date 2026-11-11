@@ -1,4 +1,4 @@
-# 版本更新记录
+# 版本更新记录 
 
 ## v0.4.1 — 2026-11-11
 - 基于 `v0.3` 修复，不继承 `v0.4`；使用独立的 IndexedDB、localStorage、迁移标记和 Service Worker Cache 命名空间。
