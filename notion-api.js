@@ -23,25 +23,10 @@ function errorMessage(status, code, fallback) {
 }
 
 export function extractNotionId(input) {
-  const raw = String(input || "").trim();
-  const dashedPattern = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
-  const exactCompact = raw.match(/^([0-9a-f]{32})$/i);
-  const exactDashed = raw.match(new RegExp(`^${dashedPattern.source}$`, "i"));
-  let id = exactCompact?.[1] || exactDashed?.[1]?.replace(/-/g, "");
-  if (!id) {
-    let lastSegment = raw;
-    try {
-      const url = new URL(raw);
-      lastSegment = decodeURIComponent(url.pathname).split("/").filter(Boolean).at(-1) || "";
-    } catch {
-      lastSegment = decodeURIComponent(raw.split(/[?#]/)[0]).split("/").filter(Boolean).at(-1) || raw;
-    }
-    const dashed = lastSegment.match(dashedPattern);
-    const compactAtEnd = lastSegment.match(/([0-9a-f]{32})$/i);
-    id = dashed?.[1]?.replace(/-/g, "") || compactAtEnd?.[1];
-  }
-  if (!id) throw new Error("无法从输入内容识别 Notion ID。");
-  id = id.toLowerCase();
+  const compact = String(input || "").trim().replace(/-/g, "");
+  const match = compact.match(/[0-9a-f]{32}/i);
+  if (!match) throw new Error("无法从输入内容识别 Notion ID。");
+  const id = match[0].toLowerCase();
   return `${id.slice(0,8)}-${id.slice(8,12)}-${id.slice(12,16)}-${id.slice(16,20)}-${id.slice(20)}`;
 }
 
@@ -120,12 +105,13 @@ class NotionApiAdapter {
     });
     const databaseId = database.id;
     const dataSourceIds = {};
+    await progress("Database 已创建，正在确认初始 Data Source…", { databaseId, dataSourceIds: {}, databaseUrl: database.url || null });
     const initial = database.data_sources?.[0];
     if (!initial?.id) throw new NotionApiError("Database 已创建，但响应中缺少初始 Data Source ID；可通过“连接已有数据库”恢复。", { code: "initialization_interrupted" });
     dataSourceIds[DATA_SOURCE_KEYS[0]] = initial.id;
     await progress("Database 已创建，正在保存恢复点…", { databaseId, dataSourceIds: { ...dataSourceIds }, databaseUrl: database.url || null });
     await this.request(`/data_sources/${initial.id}`, { method: "PATCH", body: { title: [{ type: "text", text: { content: APP_SCHEMA[DATA_SOURCE_KEYS[0]].title } }] } });
-    await progress("正在创建小分类、状态、具体资料和配对记录 Data Source…");
+    await progress("正在创建小分类、具体资料和配对记录 Data Source…");
     for (const entityKey of DATA_SOURCE_KEYS.slice(1)) {
       const dataSource = await this.createDataSource(databaseId, entityKey);
       dataSourceIds[entityKey] = dataSource.id;
@@ -181,7 +167,7 @@ class NotionApiAdapter {
       if (matches.length !== 1) missing.push(`${expected}（找到 ${matches.length} 个）`);
       else dataSourceIds[entityKey] = matches[0].id;
     }
-    if (missing.length) throw new NotionApiError(`不是符合 v0.4 的 PWA Database：${missing.join("、")}`, { code: "schema_mismatch", details: missing });
+    if (missing.length) throw new NotionApiError(`不是符合 v0.3 的 PWA Database：${missing.join("、")}`, { code: "schema_mismatch", details: missing });
     return this.buildConnection(databaseId, dataSourceIds, database.url || String(databaseInput));
   }
 
@@ -214,7 +200,7 @@ class NotionApiAdapter {
     if (mismatches.length) throw new NotionApiError(`远程 Schema 不匹配，已停止连接：${mismatches.join("；")}`, { code: "schema_mismatch", details: mismatches });
     return {
       databaseId, databaseUrl, dataSourceIds, propertyIds,
-      notionVersion: NOTION_VERSION, schemaVersion: 4,
+      notionVersion: NOTION_VERSION, schemaVersion: 3,
       connectedAt: new Date().toISOString()
     };
   }
@@ -252,10 +238,6 @@ class NotionApiAdapter {
 
   updatePage(pageId, properties) {
     return this.request(`/pages/${pageId}`, { method: "PATCH", body: { properties } });
-  }
-
-  archivePage(pageId) {
-    return this.request(`/pages/${pageId}`, { method: "PATCH", body: { archived: true } });
   }
 
   async uploadFile(file) {

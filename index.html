@@ -14,7 +14,7 @@
 </head>
 <body>
   <header class="app-header">
-    <div class="brand"><span class="brand-mark">N</span><div><strong>记录台</strong><small>Notion 本地优先 PWA · v0.4</small></div></div>
+    <div class="brand"><span class="brand-mark">N</span><div><strong>记录台</strong><small>Notion 本地优先 PWA · v0.4.1</small></div></div>
     <nav class="entity-tabs" aria-label="资料类型">
       <button class="entity-tab active" data-entity="items">具体资料 <span id="item-count">0</span></button>
       <button class="entity-tab" data-entity="pairings">配对记录 <span id="pairing-count">0</span></button>
@@ -37,6 +37,11 @@
     </section>
 
     <section class="toolbar" aria-label="资料操作">
+      <div id="desktop-category-controls" class="desktop-category-controls" aria-label="Windows 分类筛选">
+        <select id="desktop-major" aria-label="大分类"></select><button id="desktop-add-major" title="新增大分类">＋大分类</button>
+        <select id="desktop-sub" aria-label="小分类"></select><button id="desktop-add-sub" title="新增小分类">＋小分类</button>
+        <button id="desktop-manage-categories">分类管理</button>
+      </div>
       <label class="search"><span>⌕</span><input id="search" type="search" placeholder="搜索本地资料…" autocomplete="off"></label>
       <button id="add-record" class="primary">＋ 新增</button>
       <div class="desktop-view-switch" role="group" aria-label="Windows 显示方式">
@@ -65,8 +70,7 @@
       <div class="dialog-body settings-body">
         <section><h3>当前 PWA Database</h3><div id="connection-details" class="details-box"></div></section>
         <section><h3>Notion Integration Token</h3><p>Token 使用用户口令经 PBKDF2 派生密钥后，以 AES-GCM 密文保存于本机 IndexedDB；口令和解密密钥不会持久化。</p><button type="button" id="update-token">更新／重新输入 Token</button><button type="button" id="unlock-token">解锁凭证</button></section>
-        <section><h3>本地数据保护</h3><div id="storage-protection" class="details-box">正在确认浏览器存储状态…</div></section>
-        <section><h3>连接操作</h3><button type="button" id="reconnect-database">重新连接已有 Database</button><button type="button" id="clear-device-config" class="danger">清除本设备连接配置</button><p class="muted">清除本设备配置不会删除远程 Database 或远程业务数据。</p></section>
+        <section><h3>连接操作</h3><button type="button" id="create-new-database">创建新的 PWA Database</button><button type="button" id="reconnect-database">重新连接／更换 Database</button><button type="button" id="disconnect-database" class="danger">断开当前 Database</button><p class="muted">成功创建、重连或更换会删除当前 V0.4.1 本地 Workspace；断开也使用同一规则。加密 Token 与远程数据不会被删除。</p></section>
       </div>
       <footer class="dialog-footer"><span class="footer-spacer"></span><button type="button" class="close-settings">完成</button></footer>
     </form>
@@ -90,8 +94,8 @@
 
   <dialog id="category-dialog">
     <form method="dialog">
-      <header class="dialog-header"><div><small>普通业务数据</small><h2>分类与状态管理</h2></div><button type="button" class="icon-button close-category">×</button></header>
-      <div class="dialog-body category-manager"><section><h3>大分类</h3><div id="major-manager"></div></section><section><h3>所选大分类的小分类</h3><div id="sub-manager"></div></section><section class="status-manager-section"><h3>状态</h3><div id="status-manager"></div></section></div>
+      <header class="dialog-header"><div><small>业务数据</small><h2>分类管理</h2></div><button type="button" class="icon-button close-category">×</button></header>
+      <div class="dialog-body category-manager"><section><h3>大分类</h3><div id="major-manager"></div></section><section><h3>所选大分类的小分类</h3><div id="sub-manager"></div></section></div>
       <footer class="dialog-footer"><span class="muted">保存本地不会自动上传 Notion</span><span class="footer-spacer"></span><button type="button" class="close-category">完成</button></footer>
     </form>
   </dialog>

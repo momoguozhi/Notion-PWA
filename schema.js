@@ -1,27 +1,14 @@
 export const NOTION_VERSION = "2026-03-11";
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 3;
 
 export const ENTITY = Object.freeze({
   MAJOR: "majorCategories",
   SUB: "subCategories",
-  STATUS: "statuses",
   ITEM: "items",
   PAIRING: "pairings"
 });
 
-export const DATA_SOURCE_KEYS = [ENTITY.MAJOR, ENTITY.SUB, ENTITY.STATUS, ENTITY.ITEM, ENTITY.PAIRING];
-
-export const STATUS_COLORS = Object.freeze([
-  { value: "gray", label: "灰色", background: "#e9e9e7", text: "#50504d" },
-  { value: "brown", label: "棕色", background: "#eee0da", text: "#694b3d" },
-  { value: "orange", label: "橙色", background: "#fadec9", text: "#8a4b20" },
-  { value: "yellow", label: "黄色", background: "#fdecc8", text: "#806018" },
-  { value: "green", label: "绿色", background: "#dbeddb", text: "#35643a" },
-  { value: "blue", label: "蓝色", background: "#d3e5ef", text: "#28556f" },
-  { value: "purple", label: "紫色", background: "#e8deee", text: "#624578" },
-  { value: "pink", label: "粉色", background: "#f5e0e9", text: "#854868" },
-  { value: "red", label: "红色", background: "#ffe2dd", text: "#8c3b34" }
-]);
+export const DATA_SOURCE_KEYS = [ENTITY.MAJOR, ENTITY.SUB, ENTITY.ITEM, ENTITY.PAIRING];
 
 export const APP_SCHEMA = Object.freeze({
   [ENTITY.MAJOR]: {
@@ -39,14 +26,6 @@ export const APP_SCHEMA = Object.freeze({
       sort: { name: "排序", type: "number", schema: { number: { format: "number" } } }
     }
   },
-  [ENTITY.STATUS]: {
-    title: "状态",
-    properties: {
-      name: { name: "名称", type: "title", schema: { title: {} } },
-      color: { name: "颜色", type: "select", schema: { select: { options: STATUS_COLORS.map(option => ({ name: option.value, color: option.value })) } } },
-      sort: { name: "排序", type: "number", schema: { number: { format: "number" } } }
-    }
-  },
   [ENTITY.ITEM]: {
     title: "具体资料",
     properties: {
@@ -58,7 +37,7 @@ export const APP_SCHEMA = Object.freeze({
       price: { name: "价格", type: "number", schema: { number: { format: "number" } } },
       currency: { name: "货币", type: "select", schema: { select: { options: ["JPY", "CNY", "USD"].map(name => ({ name })) } } },
       quantity: { name: "数量", type: "number", schema: { number: { format: "number" } } },
-      status: { name: "状态", type: "relation", target: ENTITY.STATUS },
+      status: { name: "状态", type: "select", schema: { select: { options: ["在库", "培育中", "已售出", "已枯失", "其他"].map(name => ({ name })) } } },
       entryType: { name: "录入类型", type: "select", schema: { select: { options: ["播种苗", "成品"].map(name => ({ name })) } } },
       photos: { name: "照片", type: "files", schema: { files: {} } },
       directSource: { name: "直接来源", type: "relation", target: ENTITY.ITEM },
