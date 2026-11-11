@@ -1,5 +1,17 @@
 # 版本更新记录
 
+## v0.4.1 — 2026-11-11
+- 基于 `v0.3` 修复，不继承 `v0.4`；使用独立的 IndexedDB、localStorage、迁移标记和 Service Worker Cache 命名空间。
+- 首次启动只检查并一次性迁移 V0.3 的加密 Token、connection 和可选显示偏好，不迁移业务数据、dirty／pending、同步元数据或 staging。
+- 将业务记录、照片、同步元数据和 Refresh staging 限定到规范化 Database ID 对应的 Workspace；断开、同库重连和换库统一删除当前 Workspace，同时保留加密 Token。
+- 连接已有 Database 改为先只读验证、后确认并原子提交；创建新 Database 在远程初始化成功前保留旧连接，连接提交失败时保留初始化恢复点。
+- 增加连接 session ID，使同库重连、换库或断开后的旧 Refresh、Upload 和照片保存结果失效；区分按 Workspace 保存的 `remote-refresh` 与按目标 Database 保存的 `initialization-recovery`。
+- Refresh 改为当前 Workspace 单事务合并：保留仅本地 dirty／pending、Remote Missing 记录及其照片，并基于最终合并结果解析 Relation。
+- Relation 上传严格校验来源、目标 Workspace、目标 entity 和 Page ID；失效 Relation 明确停止写入，不按名称替代或静默转空。
+- Windows 工具栏恢复大分类、小分类、新增分类和分类管理入口；保存本地后若记录被当前分类或搜索隐藏，会明确提示已保存及所属分类。
+- 保持具体资料以 `localId`／UUID 为身份，未增加按名称覆盖、去重或 Relation 匹配；删除无引用的 `.demo-notice` 样式。
+- 最低检查：`storage.js`、`sync.js`、`app.js`、`notion-api.js`、`sw.js` 已通过 `node --check`；未执行浏览器、真实 Notion、Windows 或 iPhone 实机验证。
+
 ## v0.4 — 2026-11-10
 - 修正通用 Notion URL／UUID 解析，支持带页面标题的 `app.notion.com` URL、紧凑 ID 和标准 UUID。
 - 新增空数据库下在具体资料表单内连续创建大分类、小分类和状态的流程，并补齐分类归属修改、排序和占用删除保护。
