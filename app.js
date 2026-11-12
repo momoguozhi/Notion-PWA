@@ -4,6 +4,7 @@ import { credentials } from "./credentials.js";
 import { notionApi, NotionApiError } from "./notion-api.js";
 import { syncCoordinator } from "./sync.js";
 import { qrSvg } from "./qr.js";
+import { buildCategoryOrder, describeRecoveries, filterItemsByCategory, moveIdInOrder } from "./logic.js";
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
@@ -22,6 +23,14 @@ const state = {
   pendingCredentialAction: null,
   connectionSessionId: crypto.randomUUID(),
   connectionBusy: false,
+  uploadBusy: false,
+  recordSaveBusy: false,
+  recoveryParentInput: "",
+  managerMajorId: null,
+  managerExpandedIds: new Set(),
+  categorySortDraft: null,
+  categorySortOriginal: null,
+  categoryDrag: null,
   preferences: loadPreferences()
 };
 
@@ -41,7 +50,6 @@ function toast(message, delay = 2400) { const el = $("#toast"); el.textContent =
 function recordName(record) { return record?.name || "（未命名）"; }
 function entityList(entity = state.entity) { return state.workspace[entity] || []; }
 function byId(entity, id) { return state.workspace[entity].find(record => record.localId === id) || null; }
-function majorForSub(subId) { const sub = byId(ENTITY.SUB, subId); return sub ? byId(ENTITY.MAJOR, sub.majorLocalId) : null; }
 function categoryLabel(item) { const sub = byId(ENTITY.SUB, item.subLocalId); const major = sub ? byId(ENTITY.MAJOR, sub.majorLocalId) : null; return [major?.name, sub?.name].filter(Boolean).join(" › "); }
 function formatPrice(item) { return item.price == null || item.price === "" ? "" : `${Number(item.price).toLocaleString("zh-CN")} ${item.currency || ""}`.trim(); }
 function notionLink(item) { return item.notionPageUrl || ""; }
@@ -62,7 +70,6 @@ function itemPhotos(item) {
 function displayValue(item, key) {
   if (key === "category") return categoryLabel(item);
   if (key === "price") return formatPrice(item);
-  if (key === "notionUniqueId") return item.notionUniqueId || "本地待编号";
   return item[key] ?? "";
 }
 
@@ -104,13 +111,15 @@ function resetWorkspaceUi() {
   state.workspace = { majorCategories: [], subCategories: [], items: [], pairings: [], photos: [] };
   state.selectedMajorId = null; state.selectedSubId = null; state.query = ""; state.editingId = null;
   state.photoDraft = []; state.refreshDraft = null; state.pendingCredentialAction = null;
+  state.managerMajorId = null; state.managerExpandedIds.clear(); state.categorySortDraft = null; state.categorySortOriginal = null; state.categoryDrag = null;
   $("#search").value = "";
   ["#record-dialog", "#category-dialog", "#refresh-dialog"].forEach(selector => { const dialog = $(selector); if (dialog.open) dialog.close(); });
 }
 
 async function confirmWorkspaceRemoval(actionLabel) {
-  if (!state.connection || !(await localDb.hasPending(state.connection.databaseId))) return true;
-  return confirm(`${actionLabel}会删除当前 Database 的本地 Workspace，其中包含尚未上传的修改。\n\n确定继续并丢失这些本地内容吗？`);
+  if (!state.connection) return true;
+  const hasPending = await localDb.hasPending(state.connection.databaseId);
+  return confirm(`${actionLabel}会删除当前 Database 的本地 Workspace${hasPending ? "，其中包含尚未上传的修改" : "及其本地业务数据"}。远程 Database 与 Token 不会删除。\n\n确定继续吗？`);
 }
 
 async function commitConnectionSwitch(connection) {
@@ -133,17 +142,18 @@ async function commitConnectionSwitch(connection) {
 
 function normalizeSelection() {
   const majors = [...state.workspace.majorCategories].sort((a,b) => a.sort-b.sort);
-  if (!majors.some(record => record.localId === state.selectedMajorId)) state.selectedMajorId = majors[0]?.localId || null;
+  if (!majors.some(record => record.localId === state.selectedMajorId)) state.selectedMajorId = null;
   const subs = state.workspace.subCategories.filter(record => record.majorLocalId === state.selectedMajorId).sort((a,b) => a.sort-b.sort);
-  if (!subs.some(record => record.localId === state.selectedSubId)) state.selectedSubId = subs[0]?.localId || null;
+  if (!state.selectedMajorId || !subs.some(record => record.localId === state.selectedSubId)) state.selectedSubId = null;
 }
 
 function filteredRecords() {
   const query = state.query.toLocaleLowerCase("zh-CN");
-  return entityList().filter(record => {
+  const records = state.entity === ENTITY.ITEM
+    ? filterItemsByCategory(state.workspace.items,state.workspace.subCategories,{majorId:state.selectedMajorId,subId:state.selectedSubId})
+    : entityList();
+  return records.filter(record => {
     if (state.entity === ENTITY.ITEM) {
-      if (state.selectedSubId && record.subLocalId !== state.selectedSubId) return false;
-      if (!state.selectedSubId && state.selectedMajorId && majorForSub(record.subLocalId)?.localId !== state.selectedMajorId) return false;
       const text = [record.name, record.notionUniqueId, categoryLabel(record), record.source].join(" ").toLocaleLowerCase("zh-CN");
       return text.includes(query);
     }
@@ -160,18 +170,22 @@ function render() {
   $("#view-title").textContent = APP_SCHEMA[state.entity].title;
   $("#category-browser").hidden = state.entity !== ENTITY.ITEM;
   $("#desktop-category-controls").hidden = state.entity !== ENTITY.ITEM;
-  ["add-record","add-major","add-sub","manage-categories","desktop-add-major","desktop-add-sub","desktop-manage-categories","upload-pending","refresh-remote"].forEach(id => { $("#"+id).disabled = !state.connection; });
+  ["add-record","add-major","add-sub","manage-categories","desktop-add-major","desktop-add-sub","desktop-manage-categories","refresh-remote"].forEach(id => { $("#"+id).disabled = !state.connection; });
+  $("#upload-pending").disabled = !state.connection || state.uploadBusy;
+  $("#save-upload").disabled = state.uploadBusy || state.recordSaveBusy;
+  const localSave = $('#record-form button[type="submit"]');
+  if (localSave) localSave.disabled = state.recordSaveBusy;
   renderCategories(); renderPending(); renderViews();
 }
 
 function renderCategories() {
   if (state.entity !== ENTITY.ITEM) return;
   const majors = [...state.workspace.majorCategories].sort((a,b) => a.sort-b.sort);
-  $("#major-categories").innerHTML = majors.map(record => `<button data-major="${record.localId}" class="${record.localId===state.selectedMajorId?'active':''}">${escapeHtml(recordName(record))}</button>`).join("") || '<span class="muted">请新增大分类</span>';
+  $("#major-categories").innerHTML = `<button data-major="" class="${state.selectedMajorId?'':'active'}">全部</button>${majors.map(record => `<button data-major="${record.localId}" class="${record.localId===state.selectedMajorId?'active':''}">${escapeHtml(recordName(record))}</button>`).join("")}`;
   const subs = state.workspace.subCategories.filter(record => record.majorLocalId === state.selectedMajorId).sort((a,b) => a.sort-b.sort);
-  $("#sub-categories").innerHTML = subs.map(record => `<button data-sub="${record.localId}" class="${record.localId===state.selectedSubId?'active':''}">${escapeHtml(recordName(record))}</button>`).join("") || '<span class="muted">请新增小分类</span>';
-  $("#desktop-major").innerHTML = majors.map(record => `<option value="${record.localId}" ${record.localId===state.selectedMajorId?'selected':''}>${escapeHtml(recordName(record))}</option>`).join("") || '<option value="">无大分类</option>';
-  $("#desktop-sub").innerHTML = subs.map(record => `<option value="${record.localId}" ${record.localId===state.selectedSubId?'selected':''}>${escapeHtml(recordName(record))}</option>`).join("") || '<option value="">无小分类</option>';
+  $("#sub-categories").innerHTML = `<button data-sub="" class="${state.selectedSubId?'':'active'}">全部</button>${subs.map(record => `<button data-sub="${record.localId}" class="${record.localId===state.selectedSubId?'active':''}">${escapeHtml(recordName(record))}</button>`).join("")}`;
+  $("#desktop-major").innerHTML = `<option value="">全部大分类</option>${majors.map(record => `<option value="${record.localId}" ${record.localId===state.selectedMajorId?'selected':''}>${escapeHtml(recordName(record))}</option>`).join("")}`;
+  $("#desktop-sub").innerHTML = `<option value="">全部小分类</option>${subs.map(record => `<option value="${record.localId}" ${record.localId===state.selectedSubId?'selected':''}>${escapeHtml(recordName(record))}</option>`).join("")}`;
   $("#desktop-category-controls").hidden = state.entity !== ENTITY.ITEM;
 }
 
@@ -249,7 +263,7 @@ function renderConnectionChoice() {
 
 function renderCreateStep() {
   $("#onboarding-title").textContent = "创建新的 PWA Database";
-  $("#onboarding-body").innerHTML = `<p>请先在 Notion 中将一个空白 Page 授权给当前 Integration，然后粘贴该 Page 的 URL 或 ID。中断时会保留恢复信息，不会盲目重复建库。</p><label>已授权的空白 Page URL / ID<input id="parent-page-input" autocomplete="off"></label><div id="onboarding-progress" class="details-box" hidden></div><div class="form-actions"><button data-onboarding="choice">返回</button><button id="create-database" class="primary">开始初始化</button></div>`;
+  $("#onboarding-body").innerHTML = `<p>请先在 Notion 中将一个空白 Page 授权给当前 Integration，然后粘贴该 Page 的 URL 或 ID。中断时会保留恢复信息，不会盲目重复建库。</p><label>已授权的空白 Page URL / ID<input id="parent-page-input" autocomplete="off" value="${escapeHtml(state.recoveryParentInput)}"></label><div id="onboarding-progress" class="details-box" hidden></div><div class="form-actions"><button data-onboarding="choice">返回</button><button id="create-database" class="primary">开始初始化</button></div>`;
 }
 
 function renderConnectStep() {
@@ -258,6 +272,13 @@ function renderConnectStep() {
 }
 
 function onboardingProgress(message, isError = false) { const el = $("#onboarding-progress"); if (el) { el.hidden = false; el.classList.toggle("error-box", isError); el.textContent = message; } }
+
+function setConnectionBusy(busy, message = "") {
+  state.connectionBusy = busy;
+  $("#onboarding-dialog").classList.toggle("operation-busy", busy);
+  $$("#onboarding-dialog button").forEach(button => { button.disabled = busy; });
+  if (busy && message) onboardingProgress(message);
+}
 
 async function saveToken() {
   const token = $("#token-input").value, passphrase = $("#vault-passphrase").value;
@@ -289,58 +310,88 @@ async function requireCredential(action) {
   return true;
 }
 
+function renderRecoveryStep(recoveries) {
+  $("#onboarding-title").textContent = "处理未完成的 Database 初始化";
+  $("#onboarding-body").innerHTML = `<p>请逐条继续恢复或放弃。本机只会删除被明确放弃的 recovery 标记，不会删除 Workspace、业务数据、照片、Token 或远程 Database。</p><div class="recovery-list">${describeRecoveries(recoveries).map(label => `<div class="recovery-row"><span><strong>${escapeHtml(label.shortId)}</strong><small>${escapeHtml(label.time)}</small></span><button type="button" data-recovery-resume="${escapeHtml(label.id)}">继续恢复</button><button type="button" data-recovery-abandon="${escapeHtml(label.id)}" class="danger">放弃</button></div>`).join("")}</div><div id="onboarding-progress" class="details-box" hidden></div><div class="form-actions"><button type="button" data-onboarding="choice">取消</button></div>`;
+}
+
 async function createDatabase() {
+  if (state.uploadBusy) return toast("Upload 正在进行，不能切换 Database");
   if (state.connectionBusy) return toast("已有连接操作正在进行");
-  if (state.connection) {
-    const proceed = await localDb.hasPending(state.connection.databaseId)
-      ? await confirmWorkspaceRemoval("创建并切换到新 Database")
-      : confirm("创建成功后会替换当前 Database 连接并删除当前本地 Workspace。确定开始创建吗？");
-    if (!proceed) { $("#onboarding-dialog").close(); setBanner("ok", "已取消创建；原连接与本地 Workspace 保持不变"); return; }
-  }
-  state.connectionBusy = true;
+  const parentInput = $("#parent-page-input");
+  if (parentInput) state.recoveryParentInput = parentInput.value;
   try {
-    onboardingProgress("准备初始化…");
     const recoveries = await localDb.getInitializationRecoveries();
-    if (recoveries.length > 1) throw new Error("发现多个目标 Database 的初始化恢复点，目标身份不明确；请先使用“连接已有 Database”确认目标。");
-    let recovery = null;
-    if (recoveries.length === 1) {
-      if (!confirm(`发现 Database ${recoveries[0].targetDatabaseId} 的未完成初始化。是否恢复，避免重复建库？`)) {
-        onboardingProgress("已取消恢复；未创建新的远程 Database，恢复点仍保留。");
-        if (state.connection) $("#onboarding-dialog").close();
-        return;
-      }
-      recovery = recoveries[0];
+    if (recoveries.length) return renderRecoveryStep(recoveries);
+    await startInitialization(null, state.recoveryParentInput);
+  } catch (error) { onboardingProgress(error.message, true); setBanner("error", error.message); }
+}
+
+async function abandonRecovery(databaseId) {
+  if (state.connectionBusy) return;
+  try {
+    await localDb.abandonInitializationRecovery(databaseId);
+    const recoveries = await localDb.getInitializationRecoveries();
+    if (recoveries.length) renderRecoveryStep(recoveries);
+    else {
+      renderCreateStep();
+      $("#parent-page-input").value = state.recoveryParentInput;
+      onboardingProgress("全部 recovery 已处理；可继续创建新的 Database。");
     }
+  } catch (error) { onboardingProgress(`放弃 recovery 失败：${error.message}`, true); }
+}
+
+async function resumeRecovery(databaseId) {
+  if (state.connectionBusy) return;
+  try {
+    const recoveries = await localDb.getInitializationRecoveries();
+    const recovery = recoveries.find(item => (item.targetDatabaseId || item.databaseId) === databaseId);
+    if (!recovery) return renderRecoveryStep(recoveries);
+    await startInitialization(recovery, state.recoveryParentInput);
+  } catch (error) { onboardingProgress(`读取 recovery 失败：${error.message}`, true); }
+}
+
+async function startInitialization(recovery, parentPageInput) {
+  if (state.uploadBusy) return toast("Upload 正在进行，不能切换 Database");
+  if (state.connectionBusy) return toast("已有连接操作正在进行");
+  if (state.connection && !(await confirmWorkspaceRemoval(recovery ? "恢复初始化并切换 Database" : "创建并切换到新 Database"))) {
+    onboardingProgress("已取消；原连接、Workspace 与 recovery 保持不变。");
+    return;
+  }
+  setConnectionBusy(true, recovery ? "正在恢复初始化，请勿关闭或返回…" : "正在初始化，请勿关闭或返回…");
+  try {
     const progress = async (message, partial) => {
       onboardingProgress(message);
       if (partial?.databaseId) await localDb.putInitializationRecovery(partial.databaseId, partial);
     };
-    let connection;
-    if (recovery) connection = await notionApi.resumeInitialization(recovery, progress);
-    else connection = await notionApi.initializeDatabase($("#parent-page-input").value, progress);
+    const connection = recovery
+      ? await notionApi.resumeInitialization(recovery, progress)
+      : await notionApi.initializeDatabase(parentPageInput, progress);
     await commitConnectionSwitch(connection);
     await localDb.removeInitializationRecovery(connection.databaseId);
     $("#onboarding-dialog").close(); setBanner("ok", "初始化完成；尚未上传任何本地业务记录"); renderSettings();
   } catch (error) { onboardingProgress(error.message, true); setBanner("error", error.message); }
-  finally { state.connectionBusy = false; }
+  finally { setConnectionBusy(false); }
 }
 
 async function connectDatabase() {
+  if (state.uploadBusy) return toast("Upload 正在进行，不能切换 Database");
   if (state.connectionBusy) return toast("已有连接操作正在进行");
-  state.connectionBusy = true;
+  if (state.connection && !(await confirmWorkspaceRemoval("连接／切换 Database"))) {
+    onboardingProgress("已取消连接；原连接与 Workspace 保持不变。");
+    return;
+  }
+  setConnectionBusy(true, "正在验证并连接，请勿关闭或返回…");
   try {
-    onboardingProgress("正在 Retrieve Database 与四个 Data Source Schema…");
     const connection = await notionApi.connectDatabase($("#database-input").value);
-    if (!(await confirmWorkspaceRemoval(connection.databaseId === state.connection?.databaseId ? "重新连接同一 Database" : "切换 Database"))) {
-      $("#onboarding-dialog").close(); setBanner("ok", "已取消切换；原连接与本地 Workspace 保持不变"); return;
-    }
     await commitConnectionSwitch(connection);
     $("#onboarding-dialog").close(); setBanner("ok", "已连接；请主动点击“刷新”下载远程业务数据"); renderSettings();
   } catch (error) { onboardingProgress(error.message, true); setBanner("error", error.message); }
-  finally { state.connectionBusy = false; }
+  finally { setConnectionBusy(false); }
 }
 
 async function disconnectDatabase() {
+  if (state.uploadBusy) return toast("Upload 正在进行，不能断开 Database");
   if (!state.connection || state.connectionBusy) return;
   if (!(await confirmWorkspaceRemoval("断开当前 Database"))) return;
   state.connectionBusy = true;
@@ -357,6 +408,7 @@ async function disconnectDatabase() {
 function renderSettings() {
   const config = state.connection;
   $("#connection-details").innerHTML = config ? `<span>Database ID：${escapeHtml(config.databaseId)}</span><span>API Version：${escapeHtml(config.notionVersion)}</span><span>Schema Version：${escapeHtml(config.schemaVersion)}</span><span>凭证状态：${credentials.isUnlocked()?"已解锁":"已锁定"}</span>` : "本设备尚未连接 PWA Database。";
+  ["create-new-database","reconnect-database","disconnect-database"].forEach(id=>{$("#"+id).disabled=state.uploadBusy;});
 }
 
 function renderDisplaySettings() {
@@ -401,7 +453,6 @@ function renderItemForm(item) {
     <label class="form-control">价格<input name="price" type="number" step="0.01" min="0" value="${escapeHtml(item?.price??"")}"></label>
     <label class="form-control">货币<select name="currency">${["JPY","CNY","USD"].map(value=>`<option ${value===(item?.currency||"JPY")?'selected':''}>${value}</option>`).join("")}</select></label>
     <label class="form-control">数量<input name="quantity" type="number" min="0" value="${escapeHtml(item?.quantity??1)}"></label>
-    <label class="form-control">扦插日期<input name="cuttingDate" type="date" value="${escapeHtml(item?.cuttingDate||"")}"></label>
     <div class="form-control full"><span>照片（最多 5 张，第一张为主图）</span><label class="photo-picker"><input id="record-photo-input" type="file" accept="image/*,.heic,.heif" multiple>选择照片</label><div id="record-photo-strip" class="photo-strip">${renderPhotoDraft()}</div></div>
     ${item?.notionPageUrl?`<div class="form-control full qr-panel"><span>正式 Notion 页面二维码</span>${qrSvg(notionLink(item))}<a href="${escapeHtml(notionLink(item))}" target="_blank" rel="noreferrer">打开 Notion 页面</a></div>`:""}
   </div>`;
@@ -423,6 +474,13 @@ function renderPairingForm(record) {
 }
 
 async function saveRecordLocal() {
+  if (state.recordSaveBusy) { toast("当前记录正在保存，请勿重复提交"); return null; }
+  state.recordSaveBusy = true; render();
+  try { return await performSaveRecordLocal(); }
+  finally { state.recordSaveBusy = false; render(); }
+}
+
+async function performSaveRecordLocal() {
   if (!ensureActiveDatabase()) return null;
   const session = captureSession();
   const form = $("#record-form");
@@ -437,21 +495,19 @@ async function saveRecordLocal() {
     Object.assign(record, {
       name: values.name.trim(), subLocalId: values.subLocalId, acquisitionDate: values.acquisitionDate,
       source: values.source.trim(), price: values.price === "" ? null : Number(values.price), currency: values.currency,
-      quantity: Number(values.quantity || 1), cuttingDate: values.cuttingDate
+      quantity: Number(values.quantity || 1)
     });
     const previousPhotoIds = existing?.photoIds || [];
-    const oldIds = new Set(previousPhotoIds);
     record.photoIds = state.photoDraft.map(photo => photo.localId);
     record.photosChanged = record.photoIds.length !== previousPhotoIds.length || record.photoIds.some((id,index) => id !== previousPhotoIds[index]);
-    for (const [index, draftPhoto] of state.photoDraft.entries()) {
-      session.assertCurrent();
+    const photos = state.photoDraft.map((draftPhoto,index) => {
       const photo = { ...draftPhoto, order: index, itemLocalId: record.localId };
       if (photo.blob && !photo.fileUploadId) photo.pending = true;
-      await localDb.put("photos", photo, session.workspaceId, session.sessionId);
-      oldIds.delete(photo.localId);
-    }
-    for (const removedId of oldIds) { session.assertCurrent(); await localDb.remove("photos",removedId,session.workspaceId,session.sessionId); }
+      return photo;
+    });
     if (!existing && state.photoDraft.length) record.photosChanged = true;
+    record.dirty=true; record.pending=true; record.uploadError=null; record.updatedAt=new Date().toISOString();
+    session.assertCurrent(); await localDb.saveItemWithPhotos(record,photos,session.workspaceId,session.sessionId); state.editingId=record.localId;
   } else {
     const values = Object.fromEntries(new FormData(form).entries());
     const mother = byId(ENTITY.ITEM,values.motherLocalId), father = byId(ENTITY.ITEM,values.fatherLocalId);
@@ -462,8 +518,10 @@ async function saveRecordLocal() {
       childLocalIds: [...form.elements.childLocalIds.selectedOptions].map(option=>option.value)
     });
   }
-  record.dirty=true; record.pending=true; record.uploadError=null; record.updatedAt=new Date().toISOString();
-  session.assertCurrent(); await localDb.put(state.entity,record,session.workspaceId,session.sessionId); state.editingId=record.localId;
+  if (state.entity !== ENTITY.ITEM) {
+    record.dirty=true; record.pending=true; record.uploadError=null; record.updatedAt=new Date().toISOString();
+    session.assertCurrent(); await localDb.put(state.entity,record,session.workspaceId,session.sessionId); state.editingId=record.localId;
+  }
   await reloadWorkspace(); session.assertCurrent();
   const visible = filteredRecords().some(item => item.localId === record.localId);
   toast(visible ? "已保存到本机 IndexedDB；未自动上传" : `已保存到本机；当前筛选隐藏了该记录${state.entity===ENTITY.ITEM&&categoryLabel(record)?`（${categoryLabel(record)}）`:""}`, 4200);
@@ -471,24 +529,33 @@ async function saveRecordLocal() {
 }
 
 async function saveAndUpload() {
+  if (state.uploadBusy) return toast("已有 Upload 正在进行，请等待完成");
   const record = await saveRecordLocal(); if (!record) return;
   if (!(await requireCredential(() => uploadCurrent(record)))) return;
   await uploadCurrent(record);
 }
 
 async function uploadCurrent(record, force = false) {
+  if (state.uploadBusy) return toast("已有 Upload 正在进行，请等待完成");
   const context = captureSession();
+  state.uploadBusy = true; render();
   try {
     setBanner("warning", `正在上传“${recordName(record)}”…`);
-    await syncCoordinator.uploadRecord(state.entity,record.localId,state.connection,{force,context});
+    await syncCoordinator.runUploadBatch(state.connection,context,() => syncCoordinator.uploadRecord(record.entity,record.localId,state.connection,{force,context}));
     context.assertCurrent(); await reloadWorkspace(); context.assertCurrent(); $("#record-dialog").close(); setBanner("ok","当前记录及必要依赖已上传");
   } catch (error) {
     try { context.assertCurrent(); } catch { return; }
-    const failed = byId(state.entity, record.localId);
-    if (failed) { context.assertCurrent(); failed.uploadError = error.message; await localDb.put(state.entity, failed, context.workspaceId, context.sessionId); }
-    if (error.code === "local_remote_conflict" && confirm(`${error.message}\n\n确定以本地版本覆盖 Notion 吗？`)) return uploadCurrent(record,true);
+    const failed = byId(record.entity, record.localId);
+    if (failed) { context.assertCurrent(); failed.uploadError = error.message; await localDb.put(record.entity, failed, context.workspaceId, context.sessionId); }
+    if (error.code === "local_remote_conflict" && confirm(`${error.message}\n\n确定以本地版本覆盖 Notion 吗？`)) {
+      try {
+        await syncCoordinator.runUploadBatch(state.connection,context,() => syncCoordinator.uploadRecord(record.entity,record.localId,state.connection,{force:true,context}));
+        context.assertCurrent(); await reloadWorkspace(); $("#record-dialog").close(); setBanner("ok","已按用户确认覆盖远程记录");
+        return;
+      } catch (forceError) { setBanner("error",forceError.message); toast(forceError.message,5000); return; }
+    }
     setBanner("error",error.message); toast(error.message,5000);
-  }
+  } finally { state.uploadBusy = false; render(); }
 }
 
 async function refreshRemote() {
@@ -516,34 +583,110 @@ async function applyRefresh() {
 }
 
 async function uploadPending() {
+  if (state.uploadBusy) return toast("已有 Upload 正在进行，请等待完成");
   if (!(await requireCredential(uploadPending))) return;
   let context;
+  state.uploadBusy = true; render();
   try {
     context = captureSession();
     setBanner("warning","正在上传本地待上传变化；不会先执行刷新…");
-    const results = await syncCoordinator.uploadPending(state.connection,context,message=>setBanner("warning",message));
+    const results = await syncCoordinator.runUploadBatch(state.connection,context,() => syncCoordinator.uploadPending(state.connection,context,message=>setBanner("warning",message)));
     context.assertCurrent(); await reloadWorkspace(); context.assertCurrent();
-    if (results.failed.length) { const first=results.failed[0]; setBanner("error",`${results.uploaded} 条成功，${results.failed.length} 条失败：${first.error.message}`); if(first.error.code==="local_remote_conflict"&&confirm(`${first.error.message}\n\n确定以本地版本覆盖 Notion 吗？`)){await syncCoordinator.uploadRecord(first.entity,first.localId,state.connection,{force:true,context});return uploadPending();} }
+    if (results.failed.length) { const first=results.failed[0]; setBanner("error",`${results.uploaded} 条成功，${results.failed.length} 条失败：${first.error.message}`); if(first.error.code==="local_remote_conflict"&&confirm(`${first.error.message}\n\n确定以本地版本覆盖 Notion 吗？`)){await syncCoordinator.runUploadBatch(state.connection,context,() => syncCoordinator.uploadRecord(first.entity,first.localId,state.connection,{force:true,context}));context.assertCurrent();await reloadWorkspace();setBanner("ok","已按用户确认覆盖冲突记录；其余 pending 保留");} }
     else setBanner("ok",`已上传 ${results.uploaded} 条本地变化`);
   } catch (error) { if (context) { try { context.assertCurrent(); } catch { return; } } setBanner("error", error.message); toast(error.message, 5000); }
+  finally { state.uploadBusy = false; render(); }
 }
 
-async function addCategory(type) {
+async function addCategory(type, parentMajorId = null) {
   if (!ensureActiveDatabase()) return null;
+  const majorId = parentMajorId || state.selectedMajorId;
+  if (type===ENTITY.SUB && !majorId) {
+    openCategoryManager();
+    toast("请在分类管理中展开目标大分类后新增小分类");
+    return null;
+  }
   const name = prompt(`输入${type===ENTITY.MAJOR?"大分类":"小分类"}名称：`); if (!name?.trim()) return;
   const list = entityList(type);
   if (list.some(record=>record.name.trim().toLocaleLowerCase("zh-CN")===name.trim().toLocaleLowerCase("zh-CN"))) return toast("同类分类名称不能重复");
-  if (type===ENTITY.SUB && !state.selectedMajorId) return toast("请先选择或新增大分类");
-  const record=createLocalRecord(type,{name:name.trim(),sort:Math.max(0,...list.map(item=>item.sort||0))+10});
-  if(type===ENTITY.SUB)record.majorLocalId=state.selectedMajorId;
+  const sortScope=type===ENTITY.SUB?list.filter(item=>item.majorLocalId===majorId):list;
+  const record=createLocalRecord(type,{name:name.trim(),sort:Math.max(0,...sortScope.map(item=>item.sort||0))+10});
+  if(type===ENTITY.SUB)record.majorLocalId=majorId;
+  const draft=state.categorySortDraft?structuredClone(state.categorySortDraft):null;
+  const original=state.categorySortOriginal?structuredClone(state.categorySortOriginal):null;
   await localDb.put(type,record); await reloadWorkspace();
-  if(type===ENTITY.MAJOR)state.selectedMajorId=record.localId; else state.selectedSubId=record.localId;
-  render();
+  if(type===ENTITY.MAJOR){state.managerMajorId=record.localId;state.managerExpandedIds.add(record.localId);}
+  else {state.managerMajorId=majorId;state.managerExpandedIds.add(majorId);}
+  if($("#category-dialog").open&&draft){
+    if(type===ENTITY.MAJOR){draft.majors.push(record.localId);draft.subs[record.localId]=[];original.majors.push(record.localId);original.subs[record.localId]=[];}
+    else {draft.subs[majorId] ||= [];draft.subs[majorId].push(record.localId);original.subs[majorId] ||= [];original.subs[majorId].push(record.localId);}
+    state.categorySortDraft=draft;state.categorySortOriginal=original;renderCategoryManager();
+  }
   return record;
 }
 
-function openCategoryManager(){if(!ensureActiveDatabase())return;renderCategoryManager();$("#category-dialog").showModal();}
-function renderCategoryManager(){const majors=[...state.workspace.majorCategories].sort((a,b)=>a.sort-b.sort);$("#major-manager").innerHTML=`<div class="manager-list">${majors.map((record,index)=>`<div class="manager-row ${record.localId===state.selectedMajorId?'current':''}"><input data-category-name="${ENTITY.MAJOR}:${record.localId}" value="${escapeHtml(record.name)}"><button type="button" data-manage-major="${record.localId}">小分类</button><button type="button" data-category-move="${ENTITY.MAJOR}:${record.localId}" data-direction="${index===0?1:-1}">${index===0?'↓':'↑'}</button></div>`).join("")}<button type="button" data-category-add="${ENTITY.MAJOR}">＋ 新增大分类</button></div>`;const subs=state.workspace.subCategories.filter(record=>record.majorLocalId===state.selectedMajorId).sort((a,b)=>a.sort-b.sort);$("#sub-manager").innerHTML=`<div class="manager-list">${subs.map((record,index)=>`<div class="manager-row sub-manager-row"><input data-category-name="${ENTITY.SUB}:${record.localId}" value="${escapeHtml(record.name)}"><select data-sub-major="${record.localId}" aria-label="所属大分类">${majorOptions(record.majorLocalId)}</select><button type="button" data-category-move="${ENTITY.SUB}:${record.localId}" data-direction="${index===0?1:-1}">${index===0?'↓':'↑'}</button></div>`).join("")}<button type="button" data-category-add="${ENTITY.SUB}">＋ 新增小分类</button></div>`;}
+function initializeCategorySortDraft(){
+  const majors=[...state.workspace.majorCategories].sort((a,b)=>a.sort-b.sort);
+  state.categorySortDraft=buildCategoryOrder(majors,state.workspace.subCategories);
+  state.categorySortOriginal=structuredClone(state.categorySortDraft);
+  if(!majors.some(record=>record.localId===state.managerMajorId))state.managerMajorId=majors[0]?.localId||null;
+  if(state.managerMajorId&&!state.managerExpandedIds.size)state.managerExpandedIds.add(state.managerMajorId);
+}
+
+function openCategoryManager(){if(!ensureActiveDatabase())return;initializeCategorySortDraft();$("#category-editor").innerHTML="";renderCategoryManager();$("#category-dialog").showModal();}
+
+function renderCategoryManager(){
+  if(!state.categorySortDraft)initializeCategorySortDraft();
+  const majorById=new Map(state.workspace.majorCategories.map(record=>[record.localId,record]));
+  const subById=new Map(state.workspace.subCategories.map(record=>[record.localId,record]));
+  $("#major-manager").innerHTML=`<div class="category-tree">${state.categorySortDraft.majors.map(majorId=>{const major=majorById.get(majorId);if(!major)return"";const expanded=state.managerExpandedIds.has(majorId);const children=(state.categorySortDraft.subs[majorId]||[]).map(subId=>subById.get(subId)).filter(Boolean);return `<div class="category-tree-node" data-sort-row data-sort-entity="${ENTITY.MAJOR}" data-sort-id="${majorId}"><div class="manager-row major-manager-row ${majorId===state.managerMajorId?'current':''}"><button type="button" class="tree-toggle" data-category-toggle="${majorId}" aria-expanded="${expanded}">${expanded?'▾':'▸'}</button><button type="button" class="drag-handle" data-drag-handle aria-label="拖动大分类">⠿</button><span>${escapeHtml(recordName(major))}</span><button type="button" data-category-edit="${ENTITY.MAJOR}:${majorId}">编辑</button></div>${expanded?`<div class="category-children">${children.map(sub=>`<div class="manager-row sub-tree-row" data-sort-row data-sort-entity="${ENTITY.SUB}" data-sort-id="${sub.localId}" data-sort-parent="${majorId}"><span class="tree-indent"></span><button type="button" class="drag-handle" data-drag-handle aria-label="拖动小分类">⠿</button><span>${escapeHtml(recordName(sub))}</span><button type="button" data-category-edit="${ENTITY.SUB}:${sub.localId}">编辑</button></div>`).join("")}<button type="button" class="add-child" data-category-add="${ENTITY.SUB}" data-parent-major="${majorId}">＋ 新增小分类</button></div>`:""}</div>`;}).join("")}</div><div class="manager-actions"><button type="button" data-category-add="${ENTITY.MAJOR}">＋ 新增大分类</button><button type="button" id="reset-category-sort">取消排序修改</button><button type="button" id="save-category-sort" class="primary">保存排序</button></div>`;
+  if(!$("#category-editor").hasChildNodes())$("#category-editor").innerHTML='<p class="muted">选择大分类或小分类的“编辑”以修改名称；小分类所属大分类也在此修改。</p>';
+}
+
+function openCategoryEditor(target){
+  const[entity,id]=target.split(":"),record=byId(entity,id);if(!record)return;
+  state.managerMajorId=entity===ENTITY.MAJOR?id:record.majorLocalId;
+  if(state.managerMajorId)state.managerExpandedIds.add(state.managerMajorId);
+  $("#category-editor").innerHTML=`<div class="category-editor-panel"><h3>编辑${entity===ENTITY.MAJOR?'大分类':'小分类'}</h3><label>名称<input id="category-edit-name" value="${escapeHtml(record.name)}"></label>${entity===ENTITY.SUB?`<label>所属大分类<select id="category-edit-major">${majorOptions(record.majorLocalId)}</select></label>`:""}<div class="form-actions"><button type="button" data-category-editor-cancel>取消</button><button type="button" class="danger" data-category-delete="${target}">删除</button><button type="button" class="primary" data-category-editor-save="${target}">保存修改</button></div></div>`;
+  renderCategoryManager();
+}
+
+async function saveCategoryEdit(target){
+  const[entity,id]=target.split(":"),record=byId(entity,id);if(!record)return;
+  const name=$("#category-edit-name").value.trim();if(!name)return toast("分类名称不能为空");
+  if(entityList(entity).some(item=>item.localId!==id&&item.name.trim().toLocaleLowerCase("zh-CN")===name.toLocaleLowerCase("zh-CN")))return toast("同类分类名称不能重复");
+  const next={...record,name,dirty:true,pending:true,updatedAt:new Date().toISOString()},oldMajorId=record.majorLocalId;
+  if(entity===ENTITY.SUB){const majorId=$("#category-edit-major").value;if(!majorId||!byId(ENTITY.MAJOR,majorId))return toast("请选择有效的大分类");next.majorLocalId=majorId;if(oldMajorId!==majorId)next.sort=Math.max(0,...state.workspace.subCategories.filter(sub=>sub.majorLocalId===majorId).map(sub=>sub.sort||0))+10;state.managerMajorId=majorId;state.managerExpandedIds.add(majorId);}
+  const session=captureSession();session.assertCurrent();await localDb.put(entity,next,session.workspaceId,session.sessionId);await reloadWorkspace();session.assertCurrent();
+  if(entity===ENTITY.SUB&&oldMajorId!==next.majorLocalId){
+    for(const model of [state.categorySortDraft,state.categorySortOriginal]){model.subs[oldMajorId]=(model.subs[oldMajorId]||[]).filter(localId=>localId!==id);model.subs[next.majorLocalId] ||= [];model.subs[next.majorLocalId].push(id);}
+  }
+  $("#category-editor").innerHTML="";renderCategoryManager();toast("分类修改已保存到本机；未自动上传");
+}
+
+async function deleteCategory(target){
+  const[entity,id]=target.split(":"),record=byId(entity,id);if(!record)return;
+  if(record.notionPageId)return toast("已同步分类不能仅在本地删除；远程归档不在本版范围");
+  if(entity===ENTITY.MAJOR&&state.workspace.subCategories.some(sub=>sub.majorLocalId===id))return toast("该大分类仍包含小分类，不能删除");
+  if(entity===ENTITY.SUB&&state.workspace.items.some(item=>item.subLocalId===id))return toast("该小分类仍被具体资料使用，不能删除");
+  if(!confirm(`删除本地未上传分类“${recordName(record)}”？`))return;
+  const session=captureSession();session.assertCurrent();await localDb.remove(entity,id,session.workspaceId,session.sessionId);await reloadWorkspace();session.assertCurrent();state.managerExpandedIds.delete(id);
+  for(const model of [state.categorySortDraft,state.categorySortOriginal]){if(entity===ENTITY.MAJOR){model.majors=model.majors.filter(localId=>localId!==id);delete model.subs[id];}else model.subs[record.majorLocalId]=(model.subs[record.majorLocalId]||[]).filter(localId=>localId!==id);}
+  $("#category-editor").innerHTML="";renderCategoryManager();
+}
+
+function moveCategoryDraft(entity,id,parentId,targetId,after){
+  const list=entity===ENTITY.MAJOR?state.categorySortDraft.majors:state.categorySortDraft.subs[parentId];
+  return list ? moveIdInOrder(list,id,targetId,after) : false;
+}
+
+async function saveCategorySort(){
+  const now=new Date().toISOString(),majors=[],subs=[];
+  if(JSON.stringify(state.categorySortDraft.majors)!==JSON.stringify(state.categorySortOriginal.majors))state.categorySortDraft.majors.forEach((id,index)=>{const record=byId(ENTITY.MAJOR,id);if(record)majors.push({...record,sort:(index+1)*10,dirty:true,pending:true,updatedAt:now});});
+  Object.entries(state.categorySortDraft.subs).forEach(([majorId,ids])=>{if(JSON.stringify(ids)!==JSON.stringify(state.categorySortOriginal.subs[majorId]||[]))ids.forEach((id,index)=>{const record=byId(ENTITY.SUB,id);if(record&&record.majorLocalId===majorId)subs.push({...record,sort:(index+1)*10,dirty:true,pending:true,updatedAt:now});});});
+  if(!majors.length&&!subs.length)return toast("分类顺序没有变化");
+  const session=captureSession();session.assertCurrent();await localDb.saveCategorySort(majors,subs,session.workspaceId,session.sessionId);await reloadWorkspace();session.assertCurrent();initializeCategorySortDraft();renderCategoryManager();toast("分类排序已保存到本机；未自动上传");
+}
 
 async function createInlineCategory(type) {
   const form = $("#record-form"), majorSelect = form.elements.majorLocalId, subSelect = form.elements.subLocalId;
@@ -553,7 +696,8 @@ async function createInlineCategory(type) {
   const list = entityList(type);
   if (list.some(record => record.name.trim().toLocaleLowerCase("zh-CN") === name.trim().toLocaleLowerCase("zh-CN"))) return toast("同类分类名称不能重复");
   const session = captureSession();
-  const record = createLocalRecord(type,{name:name.trim(),sort:Math.max(0,...list.map(item=>item.sort||0))+10});
+  const sortScope=type===ENTITY.SUB?list.filter(item=>item.majorLocalId===majorSelect.value):list;
+  const record = createLocalRecord(type,{name:name.trim(),sort:Math.max(0,...sortScope.map(item=>item.sort||0))+10});
   if (type === ENTITY.SUB) record.majorLocalId = majorSelect.value;
   session.assertCurrent(); await localDb.put(type,record,session.workspaceId,session.sessionId);
   await reloadWorkspace(); session.assertCurrent();
@@ -568,38 +712,33 @@ async function createInlineCategory(type) {
   toast("分类已保存到本机；未自动上传");
 }
 
-async function changeSubMajor(localId, majorLocalId) {
-  const record = byId(ENTITY.SUB,localId);
-  if (!record || !majorLocalId || record.majorLocalId === majorLocalId) return;
-  const session = captureSession();
-  record.majorLocalId=majorLocalId; record.dirty=true; record.pending=true; record.updatedAt=new Date().toISOString();
-  session.assertCurrent(); await localDb.put(ENTITY.SUB,record,session.workspaceId,session.sessionId);
-  await reloadWorkspace(); session.assertCurrent(); renderCategoryManager(); render();
-  toast("小分类所属大分类已保存到本机；未自动上传");
-}
-
-async function renameCategory(target,value){const[entity,id]=target.split(":"),record=byId(entity,id);if(!record||!value.trim())return renderCategoryManager();if(entityList(entity).some(item=>item.localId!==id&&item.name.trim().toLocaleLowerCase("zh-CN")===value.trim().toLocaleLowerCase("zh-CN"))){toast("同类分类名称不能重复");return renderCategoryManager();}record.name=value.trim();record.dirty=true;record.pending=true;record.updatedAt=new Date().toISOString();await localDb.put(entity,record);await reloadWorkspace();renderCategoryManager();}
-async function moveCategory(target,direction){const[entity,id]=target.split(":"),record=byId(entity,id);const list=entity===ENTITY.MAJOR?[...state.workspace.majorCategories].sort((a,b)=>a.sort-b.sort):state.workspace.subCategories.filter(item=>item.majorLocalId===record.majorLocalId).sort((a,b)=>a.sort-b.sort);const index=list.findIndex(item=>item.localId===id),other=list[index+Number(direction)];if(!other)return;[record.sort,other.sort]=[other.sort,record.sort];record.dirty=record.pending=other.dirty=other.pending=true;await Promise.all([localDb.put(entity,record),localDb.put(entity,other)]);await reloadWorkspace();renderCategoryManager();}
 
 document.addEventListener("click",async event=>{
   const entity=event.target.closest("[data-entity]");if(entity){state.entity=entity.dataset.entity;state.query="";$("#search").value="";render();return;}
-  const major=event.target.closest("[data-major]");if(major){state.selectedMajorId=major.dataset.major;state.selectedSubId=null;render();return;}
-  const sub=event.target.closest("[data-sub]");if(sub){state.selectedSubId=sub.dataset.sub;render();return;}
+  const major=event.target.closest("[data-major]");if(major){state.selectedMajorId=major.dataset.major||null;state.selectedSubId=null;render();return;}
+  const sub=event.target.closest("[data-sub]");if(sub){state.selectedSubId=sub.dataset.sub||null;render();return;}
   const open=event.target.closest("[data-open-record]");if(open){openRecord(open.dataset.openRecord);return;}
   const view=event.target.closest("[data-desktop-view]");if(view){state.preferences.desktopView=view.dataset.desktopView;savePreferences();render();return;}
-  const route=event.target.closest("[data-onboarding]");if(route){openOnboarding(route.dataset.onboarding);return;}
+  const route=event.target.closest("[data-onboarding]");if(route){if(state.connectionBusy)return toast("当前操作正在进行，暂时不能返回");openOnboarding(route.dataset.onboarding);return;}
   if(event.target.id==="save-token")return saveToken();
   if(event.target.id==="unlock-submit")return unlockToken();
   if(event.target.id==="unlock-cancel")return $("#onboarding-dialog").close();
-  if(event.target.closest(".close-onboarding"))return $("#onboarding-dialog").close();
+  if(event.target.closest(".close-onboarding")){if(state.connectionBusy)return toast("当前操作正在进行，暂时不能关闭");return $("#onboarding-dialog").close();}
   if(event.target.id==="create-database")return createDatabase();
   if(event.target.id==="connect-database")return connectDatabase();
+  const resume=event.target.closest("[data-recovery-resume]");if(resume)return resumeRecovery(resume.dataset.recoveryResume);
+  const abandon=event.target.closest("[data-recovery-abandon]");if(abandon)return abandonRecovery(abandon.dataset.recoveryAbandon);
   const removePhoto=event.target.closest("[data-photo-remove]");if(removePhoto){state.photoDraft=state.photoDraft.filter(photo=>photo.localId!==removePhoto.dataset.photoRemove);refreshPhotoDraft();return;}
   const primaryPhoto=event.target.closest("[data-photo-primary]");if(primaryPhoto){const index=state.photoDraft.findIndex(photo=>photo.localId===primaryPhoto.dataset.photoPrimary);state.photoDraft.unshift(...state.photoDraft.splice(index,1));refreshPhotoDraft();return;}
   const displayMove=event.target.closest("[data-display-move]");if(displayMove){const index=state.preferences.fieldOrder.indexOf(displayMove.dataset.displayMove),target=index+Number(displayMove.dataset.direction);if(target>=0&&target<state.preferences.fieldOrder.length){state.preferences.fieldOrder.splice(target,0,state.preferences.fieldOrder.splice(index,1)[0]);savePreferences();renderDisplaySettings();render();}return;}
-  const manageMajor=event.target.closest("[data-manage-major]");if(manageMajor){state.selectedMajorId=manageMajor.dataset.manageMajor;renderCategoryManager();return;}
-  const categoryAdd=event.target.closest("[data-category-add]");if(categoryAdd){await addCategory(categoryAdd.dataset.categoryAdd);renderCategoryManager();return;}
-  const categoryMove=event.target.closest("[data-category-move]");if(categoryMove)return moveCategory(categoryMove.dataset.categoryMove,categoryMove.dataset.direction);
+  const categoryToggle=event.target.closest("[data-category-toggle]");if(categoryToggle){const id=categoryToggle.dataset.categoryToggle;state.managerMajorId=id;if(state.managerExpandedIds.has(id))state.managerExpandedIds.delete(id);else state.managerExpandedIds.add(id);renderCategoryManager();return;}
+  const categoryEdit=event.target.closest("[data-category-edit]");if(categoryEdit){openCategoryEditor(categoryEdit.dataset.categoryEdit);return;}
+  const categoryAdd=event.target.closest("[data-category-add]");if(categoryAdd){await addCategory(categoryAdd.dataset.categoryAdd,categoryAdd.dataset.parentMajor||null);return;}
+  const categorySave=event.target.closest("[data-category-editor-save]");if(categorySave)return saveCategoryEdit(categorySave.dataset.categoryEditorSave);
+  const categoryDelete=event.target.closest("[data-category-delete]");if(categoryDelete)return deleteCategory(categoryDelete.dataset.categoryDelete);
+  if(event.target.closest("[data-category-editor-cancel]")){$("#category-editor").innerHTML="";renderCategoryManager();return;}
+  if(event.target.id==="save-category-sort")return saveCategorySort();
+  if(event.target.id==="reset-category-sort"){initializeCategorySortDraft();renderCategoryManager();toast("未保存的排序修改已取消");return;}
   const inlineCategory=event.target.closest("[data-inline-category]");if(inlineCategory)return createInlineCategory(inlineCategory.dataset.inlineCategory==="major"?ENTITY.MAJOR:ENTITY.SUB);
 });
 
@@ -612,8 +751,6 @@ document.addEventListener("change",async event=>{
     if(event.target.files.length>files.length)toast("每条具体资料最多保存 5 张照片");refreshPhotoDraft();return;
   }
   if(event.target.matches("[data-display-field]")){const key=event.target.dataset.displayField;if(event.target.checked&&!state.preferences.fields.includes(key))state.preferences.fields.push(key);if(!event.target.checked)state.preferences.fields=state.preferences.fields.filter(item=>item!==key);savePreferences();render();return;}
-  if(event.target.matches("[data-category-name]"))return renameCategory(event.target.dataset.categoryName,event.target.value);
-  if(event.target.matches("[data-sub-major]"))return changeSubMajor(event.target.dataset.subMajor,event.target.value);
   if(event.target.matches('#record-form [name="majorLocalId"]')){
     const subSelect=$("#record-form").elements.subLocalId;
     subSelect.innerHTML=`<option value="">请选择</option>${subOptionsForMajor(event.target.value)}`;
@@ -621,6 +758,29 @@ document.addEventListener("change",async event=>{
     return;
   }
 });
+
+document.addEventListener("pointerdown",event=>{
+  const handle=event.target.closest("[data-drag-handle]");if(!handle)return;
+  const row=handle.closest("[data-sort-row]");if(!row)return;
+  event.preventDefault();
+  state.categoryDrag={row,entity:row.dataset.sortEntity,id:row.dataset.sortId,parentId:row.dataset.sortParent||null,pointerId:event.pointerId};
+  row.classList.add("dragging");
+  handle.setPointerCapture?.(event.pointerId);
+});
+
+document.addEventListener("pointermove",event=>{
+  const drag=state.categoryDrag;if(!drag||drag.pointerId!==event.pointerId)return;
+  event.preventDefault();
+  const target=document.elementFromPoint(event.clientX,event.clientY)?.closest("[data-sort-row]");
+  if(!target||target===drag.row||target.dataset.sortEntity!==drag.entity||(target.dataset.sortParent||null)!==drag.parentId)return;
+  const after=event.clientY>target.getBoundingClientRect().top+target.getBoundingClientRect().height/2;
+  if(!moveCategoryDraft(drag.entity,drag.id,drag.parentId,target.dataset.sortId,after))return;
+  const parent=target.parentElement;
+  parent.insertBefore(drag.row,after?target.nextSibling:target);
+},{passive:false});
+
+document.addEventListener("pointerup",event=>{if(state.categoryDrag?.pointerId===event.pointerId){state.categoryDrag.row.classList.remove("dragging");state.categoryDrag=null;}});
+document.addEventListener("pointercancel",event=>{if(state.categoryDrag?.pointerId===event.pointerId){state.categoryDrag.row.classList.remove("dragging");state.categoryDrag=null;}});
 
 $("#search").addEventListener("input",event=>{state.query=event.target.value;render();});
 $("#add-record").addEventListener("click",()=>openRecord());
@@ -637,13 +797,16 @@ $("#display-settings").addEventListener("click",()=>{renderDisplaySettings();$("
 $("#mobile-columns").addEventListener("change",event=>{state.preferences.mobileColumns=Number(event.target.value);savePreferences();render();});
 $("#desktop-columns").addEventListener("change",event=>{state.preferences.desktopColumns=Number(event.target.value);savePreferences();render();});
 $("#record-form").addEventListener("submit",async event=>{event.preventDefault();const record=await saveRecordLocal();if(record)$("#record-dialog").close();});
+$("#record-form").addEventListener("keydown",event=>{if(state.entity===ENTITY.ITEM&&event.key==="Enter"&&!event.isComposing&&event.target.matches('input:not([type="file"]), select'))event.preventDefault();});
 $("#save-upload").addEventListener("click",saveAndUpload);
 $("#delete-local").addEventListener("click",async()=>{
   const session=captureSession(),record=byId(state.entity,state.editingId);
   if(record?.notionPageId)return toast("已同步记录不能仅在本地删除；远程归档将在后续明确版本处理");
   if(record&&confirm("仅删除这条尚未上传的本地记录？")){
-    if(state.entity===ENTITY.ITEM)for(const id of record.photoIds||[]){session.assertCurrent();await localDb.remove("photos",id,session.workspaceId,session.sessionId);}
-    session.assertCurrent();await localDb.remove(state.entity,record.localId,session.workspaceId,session.sessionId);$("#record-dialog").close();await reloadWorkspace();
+    session.assertCurrent();
+    if(state.entity===ENTITY.ITEM)await localDb.deleteItemWithPhotos(record.localId,session.workspaceId,session.sessionId);
+    else await localDb.remove(state.entity,record.localId,session.workspaceId,session.sessionId);
+    $("#record-dialog").close();await reloadWorkspace();
   }
 });
 $("#apply-refresh").addEventListener("click",applyRefresh);
@@ -657,6 +820,7 @@ $$('.close-display').forEach(button=>button.addEventListener('click',()=>$("#dis
 $$('.close-record').forEach(button=>button.addEventListener('click',()=>$("#record-dialog").close()));
 $$('.close-category').forEach(button=>button.addEventListener('click',()=>$("#category-dialog").close()));
 $$('.close-refresh').forEach(button=>button.addEventListener('click',()=>$("#refresh-dialog").close()));
+$("#onboarding-dialog").addEventListener("cancel",event=>{if(state.connectionBusy){event.preventDefault();toast("当前操作正在进行，暂时不能关闭");}});
 
 async function initialize() {
   try {

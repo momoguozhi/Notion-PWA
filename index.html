@@ -14,7 +14,7 @@
 </head>
 <body>
   <header class="app-header">
-    <div class="brand"><span class="brand-mark">N</span><div><strong>记录台</strong><small>Notion 本地优先 PWA · v0.4.3</small></div></div>
+    <div class="brand"><span class="brand-mark">N</span><div><strong>记录台</strong><small>Notion 本地优先 PWA · v0.4.4</small></div></div>
     <nav class="entity-tabs" aria-label="资料类型">
       <button class="entity-tab active" data-entity="items">具体资料 <span id="item-count">0</span></button>
       <button class="entity-tab" data-entity="pairings">配对记录 <span id="pairing-count">0</span></button>
@@ -95,8 +95,8 @@
   <dialog id="category-dialog">
     <form method="dialog">
       <header class="dialog-header"><div><small>业务数据</small><h2>分类管理</h2></div><button type="button" class="icon-button close-category">×</button></header>
-      <div class="dialog-body category-manager"><section><h3>大分类</h3><div id="major-manager"></div></section><section><h3>所选大分类的小分类</h3><div id="sub-manager"></div></section></div>
-      <footer class="dialog-footer"><span class="muted">保存本地不会自动上传 Notion</span><span class="footer-spacer"></span><button type="button" class="close-category">完成</button></footer>
+      <div class="dialog-body category-manager"><section><h3>分类树与排序</h3><p class="muted">使用手柄拖动；只有点击“保存排序”才写入本地。</p><div id="major-manager"></div></section><section><h3>分类编辑</h3><div id="category-editor"></div></section></div>
+      <footer class="dialog-footer"><span class="muted">关闭不会保存尚未确认的拖动排序</span><span class="footer-spacer"></span><button type="button" class="close-category">完成</button></footer>
     </form>
   </dialog>
 

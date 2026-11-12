@@ -1,6 +1,6 @@
 export const NOTION_VERSION = "2026-03-11";
 // Remote business schema version. This is independent from the app and IndexedDB versions.
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 export const ENTITY = Object.freeze({
   MAJOR: "majorCategories",
@@ -38,8 +38,7 @@ export const APP_SCHEMA = Object.freeze({
       price: { name: "价格", type: "number", schema: { number: { format: "number" } } },
       currency: { name: "货币", type: "select", schema: { select: { options: ["JPY", "CNY", "USD"].map(name => ({ name })) } } },
       quantity: { name: "数量", type: "number", schema: { number: { format: "number" } } },
-      photos: { name: "照片", type: "files", schema: { files: {} } },
-      cuttingDate: { name: "扦插日期", type: "date", schema: { date: {} } }
+      photos: { name: "照片", type: "files", schema: { files: {} } }
     }
   },
   [ENTITY.PAIRING]: {
@@ -57,7 +56,6 @@ export const APP_SCHEMA = Object.freeze({
 
 export const ITEM_DISPLAY_FIELDS = Object.freeze([
   { key: "name", label: "名称" },
-  { key: "notionUniqueId", label: "编号" },
   { key: "category", label: "分类" },
   { key: "price", label: "价格" },
   { key: "quantity", label: "数量" },
@@ -69,7 +67,7 @@ export const DEFAULT_DISPLAY_PREFERENCES = Object.freeze({
   mobileColumns: 4,
   desktopColumns: 5,
   desktopView: "table",
-  fields: ["name", "notionUniqueId", "category"],
+  fields: ["name", "category"],
   fieldOrder: ITEM_DISPLAY_FIELDS.map(field => field.key)
 });
 
@@ -113,6 +111,6 @@ export function createLocalRecord(entity, values = {}) {
 
 export function stripDeprecatedItemFields(record) {
   const cleaned = { ...record };
-  ["status", "entryType", "directSource", "directSourceLocalId", "directSourcePageId"].forEach(key => delete cleaned[key]);
+  ["status", "entryType", "directSource", "directSourceLocalId", "directSourcePageId", "cuttingDate"].forEach(key => delete cleaned[key]);
   return cleaned;
 }

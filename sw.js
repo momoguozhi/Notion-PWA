@@ -1,4 +1,4 @@
-const CACHE_PREFIX = "notion-pwa-v0.4.3-";
+const CACHE_PREFIX = "notion-pwa-v0.4.4-";
 const CACHE_NAME = `${CACHE_PREFIX}static-1`;
 const APP_SHELL = [
   "./",
@@ -11,6 +11,7 @@ const APP_SHELL = [
   "./notion-api.js",
   "./sync.js",
   "./qr.js",
+  "./logic.js",
   "./manifest.json",
   "./assets/icon.svg",
   "./assets/icon-180.png",

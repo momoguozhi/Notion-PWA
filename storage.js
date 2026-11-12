@@ -183,6 +183,48 @@ class LocalDatabase {
     });
   }
 
+  async saveItemWithPhotos(item, photos, workspaceId = this.workspaceId, sessionId = this.activeSessionId) {
+    const active = this.requireWorkspace(workspaceId);
+    if (item.workspaceId && item.workspaceId !== active) throw new Error("已阻止跨 Workspace 保存 Item。");
+    if (photos.some(photo => photo.workspaceId && photo.workspaceId !== active)) throw new Error("已阻止跨 Workspace 保存照片。");
+    return this.queueWorkspaceWrite(sessionId, async () => {
+      const transaction = this.db.transaction([ENTITY.ITEM, "photos"], "readwrite");
+      const done = transactionDone(transaction);
+      transaction.objectStore(ENTITY.ITEM).put({ ...item, workspaceId: active });
+      await Promise.all([replaceMatching(
+        transaction.objectStore("photos"),
+        value => value.workspaceId === active && value.itemLocalId === item.localId,
+        photos.map(photo => ({ ...photo, workspaceId: active, itemLocalId: item.localId }))
+      ), done]);
+    });
+  }
+
+  async deleteItemWithPhotos(localId, workspaceId = this.workspaceId, sessionId = this.activeSessionId) {
+    const active = this.requireWorkspace(workspaceId);
+    return this.queueWorkspaceWrite(sessionId, async () => {
+      const transaction = this.db.transaction([ENTITY.ITEM, "photos"], "readwrite");
+      const done = transactionDone(transaction);
+      await Promise.all([
+        deleteMatching(transaction.objectStore(ENTITY.ITEM), value => value.workspaceId === active && value.localId === localId),
+        deleteMatching(transaction.objectStore("photos"), value => value.workspaceId === active && value.itemLocalId === localId),
+        done
+      ]);
+    });
+  }
+
+  async saveCategorySort(majorCategories, subCategories, workspaceId = this.workspaceId, sessionId = this.activeSessionId) {
+    const active = this.requireWorkspace(workspaceId);
+    const records = [...majorCategories, ...subCategories];
+    if (records.some(record => record.workspaceId && record.workspaceId !== active)) throw new Error("已阻止跨 Workspace 保存分类排序。");
+    return this.queueWorkspaceWrite(sessionId, async () => {
+      const transaction = this.db.transaction([ENTITY.MAJOR, ENTITY.SUB], "readwrite");
+      const done = transactionDone(transaction);
+      majorCategories.forEach(record => transaction.objectStore(ENTITY.MAJOR).put({ ...record, workspaceId: active }));
+      subCategories.forEach(record => transaction.objectStore(ENTITY.SUB).put({ ...record, workspaceId: active }));
+      await done;
+    });
+  }
+
   async saveConnection(config) {
     await this.put("connectionConfig", { ...config, localId: "active", schemaVersion: SCHEMA_VERSION });
   }
@@ -252,6 +294,7 @@ class LocalDatabase {
     await this.put("staging", { localId: this.initializationRecoveryId(databaseId), type: "initialization-recovery", targetDatabaseId: databaseId, ...partial, updatedAt: new Date().toISOString() });
   }
   async removeInitializationRecovery(databaseId) { await this.remove("staging", this.initializationRecoveryId(databaseId)); }
+  async abandonInitializationRecovery(databaseId) { await this.removeInitializationRecovery(databaseId); }
 
   async migrateLegacyConfiguration() {
     if (!indexedDB.databases) return { checked: false, reason: "当前浏览器不支持安全枚举旧 IndexedDB。" };

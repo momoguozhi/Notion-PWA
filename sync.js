@@ -46,8 +46,7 @@ function mapRemotePage(entity, page, connection, existing, workspaceId) {
     subPageId: read(page, ids.sub, "relation")[0] || null, subLocalId: null,
     price: read(page, ids.price, "number"), currency: read(page, ids.currency, "select") || "JPY",
     quantity: read(page, ids.quantity, "number") ?? 1,
-    remoteFiles: read(page, ids.photos, "files"), photoIds: [],
-    cuttingDate: read(page, ids.cuttingDate, "date")
+    remoteFiles: read(page, ids.photos, "files"), photoIds: []
   };
   return {
     ...base, name: read(page, ids.name, "title"), motherPageId: read(page, ids.mother, "relation")[0] || null,
@@ -135,6 +134,21 @@ function guardContext(connection, context) {
 }
 
 class SyncCoordinator {
+  constructor() {
+    this.uploadBatches = new Map();
+    this.recordUploads = new Map();
+  }
+
+  async runUploadBatch(connection, context, operation) {
+    guardContext(connection, context);
+    const key = context.workspaceId;
+    if (this.uploadBatches.has(key)) throw new NotionApiError("当前 Workspace 已有 Upload 正在进行，请等待完成后重试。", { code: "upload_in_progress" });
+    const marker = {};
+    this.uploadBatches.set(key, marker);
+    try { return await operation(); }
+    finally { if (this.uploadBatches.get(key) === marker) this.uploadBatches.delete(key); }
+  }
+
   async fetchRemoteWorkspace(connection, context) {
     guardContext(connection, context);
     const workspaceId = context.workspaceId;
@@ -199,14 +213,17 @@ class SyncCoordinator {
     const ids = connection.propertyIds[entity];
     const pageId = (targetEntity, localId, label) => this.relationPageId(workspace, targetEntity, localId, label, connection.databaseId);
     if (entity === ENTITY.MAJOR) return { [ids.name]: titleValue(record.name), [ids.sort]: { number: record.sort ?? 0 } };
-    if (entity === ENTITY.SUB) return { [ids.name]: titleValue(record.name), [ids.major]: relationValue(record.majorLocalId ? [pageId(ENTITY.MAJOR, record.majorLocalId, "大分类")] : []), [ids.sort]: { number: record.sort ?? 0 } };
+    const requiredPageId = (targetEntity, localId, label) => {
+      if (!localId) throw new Error(`${label} Relation 为必需项，已停止上传。`);
+      return pageId(targetEntity, localId, label);
+    };
+    if (entity === ENTITY.SUB) return { [ids.name]: titleValue(record.name), [ids.major]: relationValue([requiredPageId(ENTITY.MAJOR, record.majorLocalId, "所属大分类")]), [ids.sort]: { number: record.sort ?? 0 } };
     if (entity === ENTITY.ITEM) {
       const properties = {
         [ids.name]: titleValue(record.name), [ids.acquisitionDate]: dateValue(record.acquisitionDate), [ids.source]: textValue(record.source),
-        [ids.sub]: relationValue(record.subLocalId ? [pageId(ENTITY.SUB, record.subLocalId, "小分类")] : []),
+        [ids.sub]: relationValue([requiredPageId(ENTITY.SUB, record.subLocalId, "小分类")]),
         [ids.price]: { number: record.price === "" || record.price == null ? null : Number(record.price) },
-        [ids.currency]: selectValue(record.currency), [ids.quantity]: { number: Number(record.quantity ?? 1) },
-        [ids.cuttingDate]: dateValue(record.cuttingDate)
+        [ids.currency]: selectValue(record.currency), [ids.quantity]: { number: Number(record.quantity ?? 1) }
       };
       if (includePhotos) {
         const photos = workspace.photos.filter(photo => photo.workspaceId === connection.databaseId && record.photoIds?.includes(photo.localId)).sort((a,b) => a.order-b.order).slice(0,5);
@@ -216,8 +233,8 @@ class SyncCoordinator {
     }
     return {
       [ids.name]: titleValue(record.name),
-      [ids.mother]: relationValue(record.motherLocalId ? [pageId(ENTITY.ITEM, record.motherLocalId, "母本")] : []),
-      [ids.father]: relationValue(record.fatherLocalId ? [pageId(ENTITY.ITEM, record.fatherLocalId, "父本")] : []),
+      [ids.mother]: relationValue([requiredPageId(ENTITY.ITEM, record.motherLocalId, "母本")]),
+      [ids.father]: relationValue([requiredPageId(ENTITY.ITEM, record.fatherLocalId, "父本")]),
       [ids.pollinationDate]: dateValue(record.pollinationDate), [ids.harvestDate]: dateValue(record.harvestDate),
       [ids.children]: relationValue((record.childLocalIds || []).map(id => pageId(ENTITY.ITEM, id, "子代")))
     };
@@ -230,7 +247,16 @@ class SyncCoordinator {
     return [];
   }
 
-  async uploadRecord(entity, localId, connection, { force = false, visiting = new Set(), context } = {}) {
+  uploadRecord(entity, localId, connection, options = {}) {
+    const context = options.context;
+    const key = `${context?.workspaceId || ""}:${entity}:${localId}`;
+    if (this.recordUploads.has(key)) return this.recordUploads.get(key);
+    const promise = this.performUploadRecord(entity, localId, connection, options);
+    this.recordUploads.set(key, promise);
+    return promise.finally(() => { if (this.recordUploads.get(key) === promise) this.recordUploads.delete(key); });
+  }
+
+  async performUploadRecord(entity, localId, connection, { force = false, visiting = new Set(), context } = {}) {
     guardContext(connection, context);
     const visitKey = `${entity}:${localId}`;
     if (visiting.has(visitKey)) throw new Error("检测到 Relation 循环，已停止上传。");
@@ -250,6 +276,7 @@ class SyncCoordinator {
       const remote = await notionApi.retrievePage(record.notionPageId); guardContext(connection, context);
       if (record.syncBase && remote.last_edited_time !== record.syncBase) throw new NotionApiError(`“${record.name || "未命名记录"}”在 Notion 和本地都已变化，需要用户决定是否覆盖。`, { code: "local_remote_conflict", details: { remote, record } });
     }
+    let properties = await this.buildProperties(entity, record, connection, workspace, false);
     let includePhotos = false;
     if (entity === ENTITY.ITEM) {
       const photos = workspace.photos.filter(photo => photo.workspaceId === context.workspaceId && record.photoIds?.includes(photo.localId)).sort((a,b) => a.order-b.order).slice(0,5);
@@ -261,8 +288,8 @@ class SyncCoordinator {
       }
       includePhotos = includePhotos || !record.notionPageId || Boolean(record.photosChanged);
       workspace = await localDb.loadWorkspace(context.workspaceId);
+      if (includePhotos) properties = await this.buildProperties(entity, record, connection, workspace, true);
     }
-    const properties = await this.buildProperties(entity, record, connection, workspace, includePhotos);
     const page = record.notionPageId ? await notionApi.updatePage(record.notionPageId, properties) : await notionApi.createPage(connection.dataSourceIds[entity], properties);
     guardContext(connection, context);
     const ids = connection.propertyIds[entity];
