@@ -4,7 +4,7 @@ import { credentials } from "./credentials.js";
 import { notionApi, NotionApiError } from "./notion-api.js";
 import { syncCoordinator } from "./sync.js";
 import { qrSvg } from "./qr.js";
-import { buildCategoryOrder, describeRecoveries, filterItemsByCategory, moveIdInOrder } from "./logic.js";
+import { buildCategoryOrder, buildLocalDiagnostics, describeRecoveries, filterItemsByCategory, moveIdInOrder } from "./logic.js";
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
@@ -26,6 +26,8 @@ const state = {
   uploadBusy: false,
   recordSaveBusy: false,
   recoveryParentInput: "",
+  recoveryDatabaseName: "",
+  diagnostics: null,
   managerMajorId: null,
   managerExpandedIds: new Set(),
   categorySortDraft: null,
@@ -116,14 +118,14 @@ function resetWorkspaceUi() {
   ["#record-dialog", "#category-dialog", "#refresh-dialog"].forEach(selector => { const dialog = $(selector); if (dialog.open) dialog.close(); });
 }
 
-async function confirmWorkspaceRemoval(actionLabel) {
+function confirmConnectionChange(actionLabel) {
   if (!state.connection) return true;
-  const hasPending = await localDb.hasPending(state.connection.databaseId);
-  return confirm(`${actionLabel}会删除当前 Database 的本地 Workspace${hasPending ? "，其中包含尚未上传的修改" : "及其本地业务数据"}。远程 Database 与 Token 不会删除。\n\n确定继续吗？`);
+  return confirm(`${actionLabel}成功后会更改 active connection；当前 Database 的本地 Workspace、业务数据、照片与 Token 都会保留。\n\n确定继续吗？`);
 }
 
 async function commitConnectionSwitch(connection) {
   const oldWorkspaceId = state.connection?.databaseId || null;
+  const nextWorkspace = await localDb.loadWorkspace(connection?.databaseId || null);
   const nextSessionId = crypto.randomUUID();
   state.connectionSessionId = nextSessionId;
   try {
@@ -137,7 +139,9 @@ async function commitConnectionSwitch(connection) {
   state.connection = connection || null;
   localDb.setWorkspace(connection?.databaseId || null);
   resetWorkspaceUi();
-  await reloadWorkspace();
+  state.workspace = nextWorkspace;
+  normalizeSelection();
+  render();
 }
 
 function normalizeSelection() {
@@ -243,6 +247,7 @@ function openOnboarding(step = "token", options = {}) {
   if (step === "choice") renderConnectionChoice();
   if (step === "create") renderCreateStep();
   if (step === "connect") renderConnectStep();
+  if (step === "recoveries") loadRecoveryStep();
 }
 
 function renderTokenStep(update = false) {
@@ -258,12 +263,12 @@ function renderUnlockStep(after) {
 
 function renderConnectionChoice() {
   $("#onboarding-title").textContent = "选择 PWA Database";
-  $("#onboarding-body").innerHTML = `<p>Token 已配置。新设备和首个设备都必须先完成凭证配置，再选择以下操作。</p><div class="choice-grid"><button class="choice-card" data-onboarding="create"><strong>创建新的 PWA Database</strong><span>在已授权给 Integration 的空白 Notion Page 下创建四个 Data Source。</span></button><button class="choice-card" data-onboarding="connect"><strong>连接已有 PWA Database</strong><span>验证四个 Data Source 和全部 Property，不匹配时停止。</span></button></div>`;
+  $("#onboarding-body").innerHTML = `<p>Notion Page 只是创建位置；具体 Database 始终由 Database ID 识别。同一 Page 可以包含普通内容和多个 Database。</p><div class="choice-grid"><button type="button" class="choice-card" data-onboarding="create"><strong>创建新的 PWA Database</strong><span>输入名称，并在已授权的 Notion Page 中创建。</span></button><button type="button" class="choice-card" data-onboarding="connect"><strong>连接已有 PWA Database</strong><span>按 Database ID 验证 Schema，不匹配时停止。</span></button><button type="button" class="choice-card" data-onboarding="recoveries"><strong>未完成的初始化</strong><span>查看并继续 recovery；查看不会阻止新建。</span></button></div>`;
 }
 
 function renderCreateStep() {
   $("#onboarding-title").textContent = "创建新的 PWA Database";
-  $("#onboarding-body").innerHTML = `<p>请先在 Notion 中将一个空白 Page 授权给当前 Integration，然后粘贴该 Page 的 URL 或 ID。中断时会保留恢复信息，不会盲目重复建库。</p><label>已授权的空白 Page URL / ID<input id="parent-page-input" autocomplete="off" value="${escapeHtml(state.recoveryParentInput)}"></label><div id="onboarding-progress" class="details-box" hidden></div><div class="form-actions"><button data-onboarding="choice">返回</button><button id="create-database" class="primary">开始初始化</button></div>`;
+  $("#onboarding-body").innerHTML = `<p>请选择已授权给 Integration 的 Notion Page 作为创建位置。该 Page 无需为空，也可以已经包含其他 Database。</p><label>Database 名称<input id="database-name-input" autocomplete="off" value="${escapeHtml(state.recoveryDatabaseName)}" required></label><label>创建位置 Page URL / ID<input id="parent-page-input" autocomplete="off" value="${escapeHtml(state.recoveryParentInput)}" required></label><div id="onboarding-progress" class="details-box" hidden></div><div class="form-actions"><button type="button" data-onboarding="recoveries">查看未完成初始化</button><button type="button" data-onboarding="choice">返回</button><button type="button" id="create-database" class="primary">开始初始化</button></div>`;
 }
 
 function renderConnectStep() {
@@ -311,73 +316,107 @@ async function requireCredential(action) {
 }
 
 function renderRecoveryStep(recoveries) {
-  $("#onboarding-title").textContent = "处理未完成的 Database 初始化";
-  $("#onboarding-body").innerHTML = `<p>请逐条继续恢复或放弃。本机只会删除被明确放弃的 recovery 标记，不会删除 Workspace、业务数据、照片、Token 或远程 Database。</p><div class="recovery-list">${describeRecoveries(recoveries).map(label => `<div class="recovery-row"><span><strong>${escapeHtml(label.shortId)}</strong><small>${escapeHtml(label.time)}</small></span><button type="button" data-recovery-resume="${escapeHtml(label.id)}">继续恢复</button><button type="button" data-recovery-abandon="${escapeHtml(label.id)}" class="danger">放弃</button></div>`).join("")}</div><div id="onboarding-progress" class="details-box" hidden></div><div class="form-actions"><button type="button" data-onboarding="choice">取消</button></div>`;
+  $("#onboarding-title").textContent = "未完成的 Database 初始化";
+  const rows = describeRecoveries(recoveries).map(label => `<div class="recovery-row"><span><strong>${escapeHtml(label.name)}</strong><small>${escapeHtml(label.status)} · Database ID：${escapeHtml(label.shortId)}</small><small>${escapeHtml(label.time)}</small></span><button type="button" data-recovery-resume="${escapeHtml(label.localId || "")}" ${label.canResume?"":"disabled"}>继续初始化</button><button type="button" data-recovery-defer="${escapeHtml(label.localId || "")}">暂不处理</button></div>`).join("");
+  $("#onboarding-body").innerHTML = `<p>每条 recovery 都按目标 Database ID 独立保存。可以任选一条继续，也可以直接创建新的 Database；暂不处理不会修改或删除 recovery。</p><div class="recovery-list">${rows || '<div class="details-box">当前没有 initialization-recovery。</div>'}</div><div id="onboarding-progress" class="details-box" hidden></div><div class="form-actions"><button type="button" data-onboarding="create">创建新的 Database</button><button type="button" data-onboarding="choice">返回</button></div>`;
+}
+
+async function loadRecoveryStep() {
+  try { renderRecoveryStep(await localDb.getInitializationRecoveries()); }
+  catch (error) { onboardingProgress(`读取 recovery 失败：${error.message}`, true); }
 }
 
 async function createDatabase() {
   if (state.uploadBusy) return toast("Upload 正在进行，不能切换 Database");
   if (state.connectionBusy) return toast("已有连接操作正在进行");
   const parentInput = $("#parent-page-input");
+  const nameInput = $("#database-name-input");
   if (parentInput) state.recoveryParentInput = parentInput.value;
+  if (nameInput) state.recoveryDatabaseName = nameInput.value.trim();
+  if (!state.recoveryDatabaseName) return onboardingProgress("Database 名称不能为空。", true);
+  if (!state.recoveryParentInput.trim()) return onboardingProgress("请输入创建位置 Page URL / ID。", true);
   try {
-    const recoveries = await localDb.getInitializationRecoveries();
-    if (recoveries.length) return renderRecoveryStep(recoveries);
-    await startInitialization(null, state.recoveryParentInput);
+    await startInitialization(null, state.recoveryParentInput, state.recoveryDatabaseName);
   } catch (error) { onboardingProgress(error.message, true); setBanner("error", error.message); }
 }
 
-async function abandonRecovery(databaseId) {
+function deferRecovery() {
   if (state.connectionBusy) return;
-  try {
-    await localDb.abandonInitializationRecovery(databaseId);
-    const recoveries = await localDb.getInitializationRecoveries();
-    if (recoveries.length) renderRecoveryStep(recoveries);
-    else {
-      renderCreateStep();
-      $("#parent-page-input").value = state.recoveryParentInput;
-      onboardingProgress("全部 recovery 已处理；可继续创建新的 Database。");
-    }
-  } catch (error) { onboardingProgress(`放弃 recovery 失败：${error.message}`, true); }
+  openOnboarding("choice");
 }
 
-async function resumeRecovery(databaseId) {
+async function resumeRecovery(localId) {
   if (state.connectionBusy) return;
   try {
-    const recoveries = await localDb.getInitializationRecoveries();
-    const recovery = recoveries.find(item => (item.targetDatabaseId || item.databaseId) === databaseId);
-    if (!recovery) return renderRecoveryStep(recoveries);
-    await startInitialization(recovery, state.recoveryParentInput);
+    const recovery = await localDb.getInitializationRecovery(localId);
+    if (!recovery) return loadRecoveryStep();
+    const databaseId = recovery.targetDatabaseId || recovery.databaseId;
+    if (!databaseId) return onboardingProgress("该旧 recovery 缺少可确认的 Database ID，不能自动继续；记录已保留。", true);
+    await startInitialization(recovery, recovery.parentPageId || "", recovery.databaseName || "未命名 Database");
   } catch (error) { onboardingProgress(`读取 recovery 失败：${error.message}`, true); }
 }
 
-async function startInitialization(recovery, parentPageInput) {
+function initializationErrorText(error, fallbackName) {
+  const context = error.initializationContext || {};
+  const name = context.databaseName || fallbackName || "未命名 Database";
+  const stage = context.stage || "未知阶段";
+  return `初始化 Database：${name}\n失败阶段：${stage}\n错误：${error.code || error.message || "unknown_error"}`;
+}
+
+function diagnosticError(error) {
+  return { status: error.status || 0, code: error.code || "unknown_error", message: error.message || "", details: error.details ?? null };
+}
+
+async function startInitialization(recovery, parentPageInput, databaseName) {
   if (state.uploadBusy) return toast("Upload 正在进行，不能切换 Database");
   if (state.connectionBusy) return toast("已有连接操作正在进行");
-  if (state.connection && !(await confirmWorkspaceRemoval(recovery ? "恢复初始化并切换 Database" : "创建并切换到新 Database"))) {
+  if (!confirmConnectionChange(recovery ? "恢复初始化并连接目标 Database" : "创建并连接新 Database")) {
     onboardingProgress("已取消；原连接、Workspace 与 recovery 保持不变。");
     return;
   }
   setConnectionBusy(true, recovery ? "正在恢复初始化，请勿关闭或返回…" : "正在初始化，请勿关闭或返回…");
+  let lastContext = recovery ? { ...recovery } : { databaseName, parentPageId: parentPageInput, stage: "start" };
+  const recoveryLocalId = recovery?.localId || null;
+  let connectionCommitted = false;
   try {
     const progress = async (message, partial) => {
       onboardingProgress(message);
-      if (partial?.databaseId) await localDb.putInitializationRecovery(partial.databaseId, partial);
+      lastContext = { ...lastContext, ...partial };
+      if (partial?.databaseId) await localDb.putInitializationRecoveryRecord(recoveryLocalId, partial.databaseId, partial);
     };
     const connection = recovery
       ? await notionApi.resumeInitialization(recovery, progress)
-      : await notionApi.initializeDatabase(parentPageInput, progress);
-    await commitConnectionSwitch(connection);
-    await localDb.removeInitializationRecovery(connection.databaseId);
-    $("#onboarding-dialog").close(); setBanner("ok", "初始化完成；尚未上传任何本地业务记录"); renderSettings();
-  } catch (error) { onboardingProgress(error.message, true); setBanner("error", error.message); }
+      : await notionApi.initializeDatabase(parentPageInput, databaseName, progress);
+    lastContext = { ...lastContext, databaseId: connection.databaseId, targetDatabaseId: connection.databaseId, databaseName: connection.databaseName, stage: "commit-connection", progressMessage: "正在提交本机 active connection…" };
+    await localDb.putInitializationRecoveryRecord(recoveryLocalId, connection.databaseId, lastContext);
+    try { await commitConnectionSwitch(connection); }
+    catch (error) { error.initializationContext = { ...lastContext }; throw error; }
+    connectionCommitted = true;
+    try { await localDb.removeInitializationRecoveryRecord(recoveryLocalId || localDb.initializationRecoveryId(connection.databaseId)); }
+    catch (cleanupError) {
+      $("#onboarding-dialog").close();
+      setBanner("warning", `Database“${connection.databaseName || "未命名 Database"}”已正常使用，但对应 recovery 清理失败并已保留：${cleanupError.message}`);
+      renderSettings();
+      return;
+    }
+    $("#onboarding-dialog").close(); setBanner("ok", `Database“${connection.databaseName || "未命名 Database"}”初始化完成，状态：正常使用`); renderSettings();
+  } catch (error) {
+    if (connectionCommitted) throw error;
+    const context = error.initializationContext || lastContext;
+    if (context?.databaseId) {
+      try { await localDb.putInitializationRecoveryRecord(recoveryLocalId, context.databaseId, { ...context, lastError: diagnosticError(error) }); }
+      catch (storageError) { error.message += `；同时无法更新 recovery：${storageError.message}`; }
+    }
+    const message = initializationErrorText(error, recovery?.databaseName || databaseName);
+    onboardingProgress(message, true); setBanner("error", message);
+  }
   finally { setConnectionBusy(false); }
 }
 
 async function connectDatabase() {
   if (state.uploadBusy) return toast("Upload 正在进行，不能切换 Database");
   if (state.connectionBusy) return toast("已有连接操作正在进行");
-  if (state.connection && !(await confirmWorkspaceRemoval("连接／切换 Database"))) {
+  if (!confirmConnectionChange("连接／切换 Database")) {
     onboardingProgress("已取消连接；原连接与 Workspace 保持不变。");
     return;
   }
@@ -385,7 +424,7 @@ async function connectDatabase() {
   try {
     const connection = await notionApi.connectDatabase($("#database-input").value);
     await commitConnectionSwitch(connection);
-    $("#onboarding-dialog").close(); setBanner("ok", "已连接；请主动点击“刷新”下载远程业务数据"); renderSettings();
+    $("#onboarding-dialog").close(); setBanner("ok", `Database“${connection.databaseName || "未命名 Database"}”已连接，状态：正常使用；请主动刷新远程业务数据`); renderSettings();
   } catch (error) { onboardingProgress(error.message, true); setBanner("error", error.message); }
   finally { setConnectionBusy(false); }
 }
@@ -393,12 +432,12 @@ async function connectDatabase() {
 async function disconnectDatabase() {
   if (state.uploadBusy) return toast("Upload 正在进行，不能断开 Database");
   if (!state.connection || state.connectionBusy) return;
-  if (!(await confirmWorkspaceRemoval("断开当前 Database"))) return;
+  if (!confirm("断开只会移除 active connection；本地 Workspace、业务数据、照片、Token 和远程 Database 均会保留。\n\n确定继续吗？")) return;
   state.connectionBusy = true;
   try {
     await commitConnectionSwitch(null);
     $("#settings-dialog").close();
-    setBanner("warning", "Database 已断开，本地 Workspace 已删除；已保存 Token 仍保留");
+    setBanner("warning", "Database 已断开；原本地 Workspace、业务数据、照片与 Token 均已保留");
     if (credentials.isUnlocked()) openOnboarding("choice");
     else openOnboarding(await credentials.hasVault() ? "unlock" : "token", { after: () => openOnboarding("choice") });
   } catch (error) { setBanner("error", `断开失败，原连接与 Workspace 已保留：${error.message}`); }
@@ -407,8 +446,29 @@ async function disconnectDatabase() {
 
 function renderSettings() {
   const config = state.connection;
-  $("#connection-details").innerHTML = config ? `<span>Database ID：${escapeHtml(config.databaseId)}</span><span>API Version：${escapeHtml(config.notionVersion)}</span><span>Schema Version：${escapeHtml(config.schemaVersion)}</span><span>凭证状态：${credentials.isUnlocked()?"已解锁":"已锁定"}</span>` : "本设备尚未连接 PWA Database。";
-  ["create-new-database","reconnect-database","disconnect-database"].forEach(id=>{$("#"+id).disabled=state.uploadBusy;});
+  const shortId = config?.databaseId ? `${config.databaseId.slice(0,8)}…${config.databaseId.slice(-6)}` : "—";
+  $("#connection-details").innerHTML = config ? `<span>Database：${escapeHtml(config.databaseName || "未命名 Database")}</span><span>状态：正常使用</span><span>Database ID：${escapeHtml(shortId)}</span><span>Workspace ID：${escapeHtml(config.databaseId)}</span><span>API Version：${escapeHtml(config.notionVersion)}</span><span>Schema Version：${escapeHtml(config.schemaVersion)}</span><span>凭证状态：${credentials.isUnlocked()?"已解锁":"已锁定"}</span>` : "本设备尚未连接 PWA Database。";
+  ["create-new-database","reconnect-database","disconnect-database"].forEach(id=>{$("#"+id).disabled=state.uploadBusy||state.connectionBusy;});
+}
+
+async function refreshDiagnostics() {
+  const staging = await localDb.getStagingRecords();
+  const recoveries = staging.filter(record => record.type === "initialization-recovery");
+  const workspace = state.connection ? await localDb.loadWorkspace(state.connection.databaseId) : { majorCategories: [], subCategories: [], items: [], pairings: [], photos: [] };
+  state.diagnostics = buildLocalDiagnostics({
+    connection: state.connection, recoveries, staging, workspace,
+    sessionId: state.connectionSessionId, connectionBusy: state.connectionBusy, uploadBusy: state.uploadBusy
+  });
+  $("#diagnostics-output").textContent = JSON.stringify(state.diagnostics, null, 2);
+  return state.diagnostics;
+}
+
+async function copyDiagnostics() {
+  try {
+    const diagnostics = await refreshDiagnostics();
+    await navigator.clipboard.writeText(JSON.stringify(diagnostics, null, 2));
+    toast("诊断 JSON 已复制；不包含 Token、密码、Photo Blob 或业务正文");
+  } catch (error) { toast(`复制诊断失败：${error.message}`, 5000); }
 }
 
 function renderDisplaySettings() {
@@ -727,7 +787,7 @@ document.addEventListener("click",async event=>{
   if(event.target.id==="create-database")return createDatabase();
   if(event.target.id==="connect-database")return connectDatabase();
   const resume=event.target.closest("[data-recovery-resume]");if(resume)return resumeRecovery(resume.dataset.recoveryResume);
-  const abandon=event.target.closest("[data-recovery-abandon]");if(abandon)return abandonRecovery(abandon.dataset.recoveryAbandon);
+  const defer=event.target.closest("[data-recovery-defer]");if(defer)return deferRecovery();
   const removePhoto=event.target.closest("[data-photo-remove]");if(removePhoto){state.photoDraft=state.photoDraft.filter(photo=>photo.localId!==removePhoto.dataset.photoRemove);refreshPhotoDraft();return;}
   const primaryPhoto=event.target.closest("[data-photo-primary]");if(primaryPhoto){const index=state.photoDraft.findIndex(photo=>photo.localId===primaryPhoto.dataset.photoPrimary);state.photoDraft.unshift(...state.photoDraft.splice(index,1));refreshPhotoDraft();return;}
   const displayMove=event.target.closest("[data-display-move]");if(displayMove){const index=state.preferences.fieldOrder.indexOf(displayMove.dataset.displayMove),target=index+Number(displayMove.dataset.direction);if(target>=0&&target<state.preferences.fieldOrder.length){state.preferences.fieldOrder.splice(target,0,state.preferences.fieldOrder.splice(index,1)[0]);savePreferences();renderDisplaySettings();render();}return;}
@@ -792,7 +852,7 @@ $("#desktop-add-sub").addEventListener("click",()=>addCategory(ENTITY.SUB));
 $("#desktop-manage-categories").addEventListener("click",openCategoryManager);
 $("#refresh-remote").addEventListener("click",refreshRemote);
 $("#upload-pending").addEventListener("click",uploadPending);
-$("#open-settings").addEventListener("click",()=>{renderSettings();$("#settings-dialog").showModal();});
+$("#open-settings").addEventListener("click",()=>{renderSettings();$("#settings-dialog").showModal();refreshDiagnostics().catch(error=>toast(`读取诊断失败：${error.message}`,5000));});
 $("#display-settings").addEventListener("click",()=>{renderDisplaySettings();$("#display-dialog").showModal();});
 $("#mobile-columns").addEventListener("change",event=>{state.preferences.mobileColumns=Number(event.target.value);savePreferences();render();});
 $("#desktop-columns").addEventListener("change",event=>{state.preferences.desktopColumns=Number(event.target.value);savePreferences();render();});
@@ -815,6 +875,8 @@ $("#unlock-token").addEventListener("click",()=>{$("#settings-dialog").close();o
 $("#create-new-database").addEventListener("click",async()=>{$("#settings-dialog").close();if(await requireCredential(()=>openOnboarding("create")))openOnboarding("create");});
 $("#reconnect-database").addEventListener("click",async()=>{$("#settings-dialog").close();if(await requireCredential(()=>openOnboarding("connect")))openOnboarding("connect");});
 $("#disconnect-database").addEventListener("click",disconnectDatabase);
+$("#refresh-diagnostics").addEventListener("click",()=>refreshDiagnostics().catch(error=>toast(`读取诊断失败：${error.message}`,5000)));
+$("#copy-diagnostics").addEventListener("click",copyDiagnostics);
 $$('.close-settings').forEach(button=>button.addEventListener('click',()=>$("#settings-dialog").close()));
 $$('.close-display').forEach(button=>button.addEventListener('click',()=>$("#display-dialog").close()));
 $$('.close-record').forEach(button=>button.addEventListener('click',()=>$("#record-dialog").close()));
@@ -840,7 +902,7 @@ async function initialize() {
     }
     state.connection=await localDb.getConnection(); localDb.setWorkspace(state.connection?.databaseId || null); await reloadWorkspace();
     if(!state.connection){setBanner("warning","请先配置 Token，再创建或连接 PWA Database");openOnboarding(await credentials.hasVault()?"unlock":"token");}
-    else setBanner("ok","已加载当前空本地 Workspace；未自动请求 Notion，凭证当前已锁定");
+    else setBanner("ok",`已加载 Database“${state.connection.databaseName || "未命名 Database"}”的本地 Workspace，状态：正常使用；未自动请求 Notion`);
   } catch(error){setBanner("error",`本机 IndexedDB 初始化失败：${error.message}`);}
   if("serviceWorker" in navigator)navigator.serviceWorker.register("./sw.js").catch(()=>setBanner("warning","本机数据可用，但离线应用壳注册失败"));
 }

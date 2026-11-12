@@ -31,7 +31,7 @@ export const APP_SCHEMA = Object.freeze({
     title: "具体资料",
     properties: {
       name: { name: "名称", type: "title", schema: { title: {} } },
-      uniqueId: { name: "个体编号", type: "unique_id", schema: { unique_id: { prefix: "ITEM" } }, readonly: true },
+      uniqueId: { name: "个体编号", type: "unique_id", schema: { unique_id: { prefix: null } }, readonly: true },
       acquisitionDate: { name: "入手日期", type: "date", schema: { date: {} } },
       source: { name: "来源", type: "rich_text", schema: { rich_text: {} } },
       sub: { name: "小分类", type: "relation", target: ENTITY.SUB },

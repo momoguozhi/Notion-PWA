@@ -1,5 +1,15 @@
 # 版本更新记录
 
+## v0.4.5 — 2026-11-12
+- 创建流程改为要求并保存用户输入的 Database 名称；Notion Page 仅作为创建 parent，Database ID 作为连接、Workspace 与 recovery 身份，同名 Database 可独立初始化。
+- initialization-recovery 改为按目标 Database ID 独立列出，并保留名称、状态、短 ID、时间、阶段、Data Source ID 与结构化错误；“暂不处理”不写入或删除记录，多条 recovery 不阻止新建。
+- 恢复流程严格重新读取原目标 Database，校验已保存 Data Source 的 parent，复用目标内正确对象、仅创建缺失对象、按实际 Relation 目标补建并执行最终 Schema 验证；成功提交 connection 后只清除选中的 recovery。
+- 初始化阶段增加精确进度与 409 错误定位；移除具体资料 `unique_id` 的固定 `ITEM` prefix，改由 Notion 使用空 prefix 配置，并避免对已正确 Relation 无条件重复 PATCH。该修改已通过无网络请求构造测试，真实 Notion 409 是否消失仍待人工复测。
+- 连接切换／断开不再删除旧 Workspace 的业务数据、照片、同步元数据或 Refresh staging；目标 Workspace 在 connection 提交前读取，读取或提交失败时原 active connection 与 Workspace 保持不变。
+- 设置页增加 Database 名称、状态与短 ID，并加入只读本机诊断：区分全部 recovery、各类 staging 与当前 Workspace 数量／pending／dirty／busy，不输出 Token、密码、Photo Blob 或完整业务正文。
+- 保持 `SCHEMA_VERSION = 5`，未增加远程版本字段或新版本体系；页面与 Service Worker Cache 更新为 v0.4.5，继续沿用 `notion-pwa-v041` IndexedDB。
+- 9 个 JavaScript 文件通过 `node --check`；直接调用实际 `notion-api.js`、`storage.js`、`logic.js` 的无网络隔离测试覆盖双 Database 请求隔离、恢复复用、409 阶段、0／1／多 recovery、精确清理、连接事务与诊断脱敏。未操作真实浏览器、IndexedDB、Notion、账号或设备。
+
 ## v0.4.4 — 2026-11-12
 - 初始化恢复页支持列出多个 recovery，并可逐项继续或放弃；放弃仅删除目标 recovery 标记，全部处理后可返回创建流程。初始化、恢复和连接的关键异步阶段锁定返回、关闭、重复开始及 Escape 取消。
 - 为同一 Workspace 的所有 Upload 与冲突重试增加批次互斥，并为同一 local UUID 增加记录级合并；失败时释放锁且保留 pending。小分类所属大分类、具体资料小分类、配对母本／父本在照片或页面远程写入前强制验证，子代仍允许为空。

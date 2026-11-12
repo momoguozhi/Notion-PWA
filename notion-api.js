@@ -39,6 +39,12 @@ function plainTitle(value) {
   return "";
 }
 
+function databaseTitle(database) {
+  return plainTitle(database?.title).trim() || "未命名 Database";
+}
+
+function compactId(value) { return String(value || "").replace(/-/g, "").toLowerCase(); }
+
 class NotionApiAdapter {
   constructor() { this.apiBase = DEFAULT_API_BASE; }
 
@@ -90,68 +96,139 @@ class NotionApiAdapter {
   async updateRelations(entityKey, dataSourceIds) {
     const properties = relationProperties(entityKey, dataSourceIds);
     if (!Object.keys(properties).length) return;
-    await this.request(`/data_sources/${dataSourceIds[entityKey]}`, {
-      method: "PATCH", body: { properties }
+    const source = await this.retrieveDataSource(dataSourceIds[entityKey]);
+    const changes = {};
+    for (const [name, expected] of Object.entries(properties)) {
+      const actual = Object.values(source.properties || {}).find(property => property.name === name);
+      if (actual?.type !== "relation" || compactId(actual.relation?.data_source_id) !== compactId(expected.relation.data_source_id)) changes[name] = expected;
+    }
+    if (Object.keys(changes).length) await this.request(`/data_sources/${dataSourceIds[entityKey]}`, {
+      method: "PATCH", body: { properties: changes }
     });
   }
 
-  async initializeDatabase(parentPageInput, progress = () => {}) {
-    const parentPageId = extractNotionId(parentPageInput);
-    await progress("正在创建专属 Database 和大分类 Data Source…");
-    const database = await this.request("/databases", {
-      method: "POST",
-      body: {
-        parent: { type: "page_id", page_id: parentPageId },
-        title: [{ type: "text", text: { content: "NOTION PWA" } }],
-        initial_data_source: { properties: baseProperties(DATA_SOURCE_KEYS[0]) }
-      }
-    });
-    const databaseId = database.id;
-    const dataSourceIds = {};
-    await progress("Database 已创建，正在确认初始 Data Source…", { databaseId, dataSourceIds: {}, databaseUrl: database.url || null });
-    const initial = database.data_sources?.[0];
-    if (!initial?.id) throw new NotionApiError("Database 已创建，但响应中缺少初始 Data Source ID；可通过“连接已有数据库”恢复。", { code: "initialization_interrupted" });
-    dataSourceIds[DATA_SOURCE_KEYS[0]] = initial.id;
-    await progress("Database 已创建，正在保存恢复点…", { databaseId, dataSourceIds: { ...dataSourceIds }, databaseUrl: database.url || null });
-    await this.request(`/data_sources/${initial.id}`, { method: "PATCH", body: { title: [{ type: "text", text: { content: APP_SCHEMA[DATA_SOURCE_KEYS[0]].title } }] } });
-    await progress("正在创建小分类、具体资料和配对记录 Data Source…");
-    for (const entityKey of DATA_SOURCE_KEYS.slice(1)) {
-      const dataSource = await this.createDataSource(databaseId, entityKey);
-      dataSourceIds[entityKey] = dataSource.id;
-      await progress(`已创建 ${APP_SCHEMA[entityKey].title}，正在保存恢复点…`, { databaseId, dataSourceIds: { ...dataSourceIds }, databaseUrl: database.url || null });
+  assertDataSourceParent(source, databaseId) {
+    const parentId = source?.parent?.database_id;
+    if (parentId && compactId(parentId) !== compactId(databaseId)) {
+      throw new NotionApiError("Recovery 中记录的 Data Source 不属于目标 Database，已停止以避免跨 Database 修改。", {
+        code: "database_identity_mismatch", details: { targetDatabaseId: databaseId, dataSourceId: source.id, parentDatabaseId: parentId }
+      });
     }
-    await progress("正在补建 Relation Property…");
-    for (const entityKey of DATA_SOURCE_KEYS) await this.updateRelations(entityKey, dataSourceIds);
-    await progress("正在重新读取并验证最终 Schema…");
-    return this.buildConnection(databaseId, dataSourceIds, database.url || null);
+  }
+
+  async ensureDataSourceTitle(source, entityKey) {
+    const expected = APP_SCHEMA[entityKey].title;
+    if (this.dataSourceTitle(source) === expected) return source;
+    return this.request(`/data_sources/${source.id}`, { method: "PATCH", body: { title: [{ type: "text", text: { content: expected } }] } });
+  }
+
+  async initializeDatabase(parentPageInput, databaseName, progress = () => {}) {
+    const parentPageId = extractNotionId(parentPageInput);
+    const name = String(databaseName || "").trim();
+    if (!name) throw new Error("Database 名称不能为空。");
+    let context = { databaseName: name, parentPageId, stage: "create-database", progressMessage: "正在创建 Database…" };
+    const report = async (message, patch = {}) => {
+      context = { ...context, ...patch, progressMessage: message };
+      await progress(message, { ...context, dataSourceIds: { ...(context.dataSourceIds || {}) } });
+    };
+    try {
+      await report("正在创建 Database 和初始大分类 Data Source…");
+      const database = await this.request("/databases", {
+        method: "POST",
+        body: {
+          parent: { type: "page_id", page_id: parentPageId },
+          title: [{ type: "text", text: { content: name } }],
+          initial_data_source: { properties: baseProperties(DATA_SOURCE_KEYS[0]) }
+        }
+      });
+      const databaseId = database.id;
+      const dataSourceIds = {};
+      await report("Database 已创建，正在确认初始 Data Source…", { databaseId, targetDatabaseId: databaseId, databaseUrl: database.url || null, dataSourceIds, stage: "confirm-initial-data-source" });
+      const initial = database.data_sources?.[0];
+      if (!initial?.id) throw new NotionApiError("Database 已创建，但响应中缺少初始 Data Source ID；目标 Database recovery 已保留。", { code: "initialization_interrupted" });
+      dataSourceIds[DATA_SOURCE_KEYS[0]] = initial.id;
+      await report("正在确认大分类 Data Source 名称…", { dataSourceIds: { ...dataSourceIds }, stage: `ensure-data-source:${DATA_SOURCE_KEYS[0]}` });
+      const initialSource = await this.retrieveDataSource(initial.id);
+      this.assertDataSourceParent(initialSource, databaseId);
+      await this.ensureDataSourceTitle(initialSource, DATA_SOURCE_KEYS[0]);
+      for (const entityKey of DATA_SOURCE_KEYS.slice(1)) {
+        await report(`正在创建 ${APP_SCHEMA[entityKey].title} Data Source…`, { dataSourceIds: { ...dataSourceIds }, stage: `create-data-source:${entityKey}` });
+        const dataSource = await this.createDataSource(databaseId, entityKey);
+        this.assertDataSourceParent(dataSource, databaseId);
+        dataSourceIds[entityKey] = dataSource.id;
+        await report(`已创建 ${APP_SCHEMA[entityKey].title}，恢复点已更新。`, { dataSourceIds: { ...dataSourceIds } });
+      }
+      for (const entityKey of DATA_SOURCE_KEYS) {
+        await report(`正在核对 ${APP_SCHEMA[entityKey].title} Relation…`, { dataSourceIds: { ...dataSourceIds }, stage: `ensure-relations:${entityKey}` });
+        await this.updateRelations(entityKey, dataSourceIds);
+      }
+      await report("正在重新读取并验证最终 Schema…", { dataSourceIds: { ...dataSourceIds }, stage: "validate-schema" });
+      const connection = await this.buildConnection(databaseId, dataSourceIds, database.url || null, name);
+      await report("Schema 验证完成，等待提交本机 connection…", { dataSourceIds: { ...dataSourceIds }, stage: "schema-verified" });
+      return connection;
+    } catch (error) {
+      error.initializationContext = { ...context, dataSourceIds: { ...(context.dataSourceIds || {}) } };
+      throw error;
+    }
   }
 
   async resumeInitialization(partial, progress = () => {}) {
-    const databaseId = extractNotionId(partial.databaseId);
-    const database = await this.retrieveDatabase(databaseId);
-    const summaries = database.data_sources || [];
-    const dataSourceIds = { ...(partial.dataSourceIds || {}) };
-    for (const entityKey of DATA_SOURCE_KEYS) {
-      if (dataSourceIds[entityKey]) {
-        try { await this.retrieveDataSource(dataSourceIds[entityKey]); continue; }
-        catch (error) { if (error.status !== 404) throw error; delete dataSourceIds[entityKey]; }
+    const databaseId = extractNotionId(partial.targetDatabaseId || partial.databaseId);
+    let context = { ...partial, databaseId, targetDatabaseId: databaseId, stage: "retrieve-target-database", progressMessage: "正在读取 recovery 目标 Database…" };
+    const report = async (message, patch = {}) => {
+      context = { ...context, ...patch, progressMessage: message };
+      await progress(message, { ...context, dataSourceIds: { ...(context.dataSourceIds || {}) } });
+    };
+    try {
+      await report("正在按 Database ID 读取 recovery 目标…");
+      const database = await this.retrieveDatabase(databaseId);
+      const name = partial.databaseName || databaseTitle(database);
+      const summaries = database.data_sources || [];
+      const dataSourceIds = { ...(partial.dataSourceIds || {}) };
+      context = { ...context, databaseName: name, databaseUrl: partial.databaseUrl || database.url || null, dataSourceIds };
+      for (const entityKey of DATA_SOURCE_KEYS) {
+        let source = null;
+        if (dataSourceIds[entityKey]) {
+          try {
+            source = await this.retrieveDataSource(dataSourceIds[entityKey]);
+            this.assertDataSourceParent(source, databaseId);
+          } catch (error) {
+            if (error.status !== 404) throw error;
+            delete dataSourceIds[entityKey];
+          }
+        }
+        if (!source) {
+          const matches = summaries.filter(summary => this.dataSourceTitle(summary) === APP_SCHEMA[entityKey].title);
+          if (matches.length > 1) throw new NotionApiError(`目标 Database 内存在多个“${APP_SCHEMA[entityKey].title}”Data Source，无法安全恢复。`, { code: "schema_mismatch" });
+          if (matches.length === 1) {
+            source = await this.retrieveDataSource(matches[0].id);
+            this.assertDataSourceParent(source, databaseId);
+            dataSourceIds[entityKey] = source.id;
+          }
+        }
+        if (source) {
+          await report(`恢复初始化：复用目标 Database 内已有的 ${APP_SCHEMA[entityKey].title}。`, { databaseName: name, dataSourceIds: { ...dataSourceIds }, stage: `reuse-data-source:${entityKey}` });
+          await this.ensureDataSourceTitle(source, entityKey);
+          continue;
+        }
+        await report(`恢复初始化：正在创建缺失的 ${APP_SCHEMA[entityKey].title}…`, { databaseName: name, dataSourceIds: { ...dataSourceIds }, stage: `create-data-source:${entityKey}` });
+        const created = await this.createDataSource(databaseId, entityKey);
+        this.assertDataSourceParent(created, databaseId);
+        dataSourceIds[entityKey] = created.id;
+        await report(`已恢复 ${APP_SCHEMA[entityKey].title}，恢复点已更新。`, { dataSourceIds: { ...dataSourceIds } });
       }
-      const matches = summaries.filter(summary => this.dataSourceTitle(summary) === APP_SCHEMA[entityKey].title);
-      if (matches.length > 1) {
-        throw new NotionApiError(`恢复初始化时发现多个“${APP_SCHEMA[entityKey].title}”Data Source，已停止以避免错连。`, { code: "schema_mismatch" });
+      for (const entityKey of DATA_SOURCE_KEYS) {
+        await report(`恢复初始化：正在核对 ${APP_SCHEMA[entityKey].title} Relation…`, { dataSourceIds: { ...dataSourceIds }, stage: `ensure-relations:${entityKey}` });
+        await this.updateRelations(entityKey, dataSourceIds);
       }
-      if (matches.length === 1) {
-        dataSourceIds[entityKey] = matches[0].id;
-        await progress(`恢复初始化：已找到现有 ${APP_SCHEMA[entityKey].title}，未重复创建。`, { databaseId, dataSourceIds: { ...dataSourceIds }, databaseUrl: partial.databaseUrl || database.url || null });
-        continue;
-      }
-      await progress(`恢复初始化：正在创建缺失的 ${APP_SCHEMA[entityKey].title}…`);
-      const created = await this.createDataSource(databaseId, entityKey);
-      dataSourceIds[entityKey] = created.id;
-      await progress(`已恢复 ${APP_SCHEMA[entityKey].title}，正在保存恢复点…`, { databaseId, dataSourceIds: { ...dataSourceIds }, databaseUrl: partial.databaseUrl || null });
+      await report("恢复初始化：正在验证最终 Schema…", { dataSourceIds: { ...dataSourceIds }, stage: "validate-schema" });
+      const connection = await this.buildConnection(databaseId, dataSourceIds, partial.databaseUrl || database.url || null, name);
+      await report("Schema 验证完成，等待提交本机 connection…", { dataSourceIds: { ...dataSourceIds }, stage: "schema-verified" });
+      return connection;
+    } catch (error) {
+      error.initializationContext = { ...context, dataSourceIds: { ...(context.dataSourceIds || {}) } };
+      throw error;
     }
-    for (const entityKey of DATA_SOURCE_KEYS) await this.updateRelations(entityKey, dataSourceIds);
-    return this.buildConnection(databaseId, dataSourceIds, partial.databaseUrl || null);
   }
 
   dataSourceTitle(summary) {
@@ -171,10 +248,10 @@ class NotionApiAdapter {
       else dataSourceIds[entityKey] = matches[0].id;
     }
     if (missing.length) throw new NotionApiError(`不是符合当前 PWA 必需 Schema 的 Database：${missing.join("、")}`, { code: "schema_mismatch", details: missing });
-    return this.buildConnection(databaseId, dataSourceIds, database.url || String(databaseInput));
+    return this.buildConnection(databaseId, dataSourceIds, database.url || String(databaseInput), databaseTitle(database));
   }
 
-  async buildConnection(databaseId, dataSourceIds, databaseUrl) {
+  async buildConnection(databaseId, dataSourceIds, databaseUrl, databaseName = "未命名 Database") {
     const propertyIds = {};
     const mismatches = [];
     for (const entityKey of DATA_SOURCE_KEYS) {
@@ -202,7 +279,7 @@ class NotionApiAdapter {
     }
     if (mismatches.length) throw new NotionApiError(`远程 Schema 不匹配，已停止连接：${mismatches.join("；")}`, { code: "schema_mismatch", details: mismatches });
     return {
-      databaseId, databaseUrl, dataSourceIds, propertyIds,
+      databaseId, databaseName: String(databaseName || "").trim() || "未命名 Database", databaseUrl, dataSourceIds, propertyIds,
       notionVersion: NOTION_VERSION, schemaVersion: SCHEMA_VERSION,
       connectedAt: new Date().toISOString()
     };

@@ -14,7 +14,7 @@
 </head>
 <body>
   <header class="app-header">
-    <div class="brand"><span class="brand-mark">N</span><div><strong>记录台</strong><small>Notion 本地优先 PWA · v0.4.4</small></div></div>
+    <div class="brand"><span class="brand-mark">N</span><div><strong>记录台</strong><small>Notion 本地优先 PWA · v0.4.5</small></div></div>
     <nav class="entity-tabs" aria-label="资料类型">
       <button class="entity-tab active" data-entity="items">具体资料 <span id="item-count">0</span></button>
       <button class="entity-tab" data-entity="pairings">配对记录 <span id="pairing-count">0</span></button>
@@ -70,7 +70,8 @@
       <div class="dialog-body settings-body">
         <section><h3>当前 PWA Database</h3><div id="connection-details" class="details-box"></div></section>
         <section><h3>Notion Integration Token</h3><p>Token 使用用户口令经 PBKDF2 派生密钥后，以 AES-GCM 密文保存于本机 IndexedDB；口令和解密密钥不会持久化。</p><button type="button" id="update-token">更新／重新输入 Token</button><button type="button" id="unlock-token">解锁凭证</button></section>
-        <section><h3>连接操作</h3><button type="button" id="create-new-database">创建新的 PWA Database</button><button type="button" id="reconnect-database">重新连接／更换 Database</button><button type="button" id="disconnect-database" class="danger">断开当前 Database</button><p class="muted">成功创建、重连或更换会删除当前 Database 的本地 Workspace；断开也使用同一规则。加密 Token 与远程数据不会被删除。</p></section>
+        <section><h3>连接操作</h3><button type="button" id="create-new-database">创建新的 PWA Database</button><button type="button" id="reconnect-database">重新连接／更换 Database</button><button type="button" id="disconnect-database" class="danger">断开当前 Database</button><p class="muted">创建、连接、恢复或断开不会删除既有本地 Workspace、业务数据、照片、Token 或远程 Database。active connection 只在验证与本地提交成功后改变。</p></section>
+        <section><h3>本机诊断信息</h3><p>只读统计当前 connection、全部 recovery／staging，以及当前 Workspace 的数量与同步状态；不包含 Token、密码、Photo Blob 或完整业务正文。</p><button type="button" id="refresh-diagnostics">刷新</button><button type="button" id="copy-diagnostics">复制诊断 JSON</button><pre id="diagnostics-output" class="diagnostics-output">尚未读取。</pre></section>
       </div>
       <footer class="dialog-footer"><span class="footer-spacer"></span><button type="button" class="close-settings">完成</button></footer>
     </form>

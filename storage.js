@@ -246,18 +246,11 @@ class LocalDatabase {
     this.switchInProgress = true;
     return this.queueExclusiveWrite(async () => {
       try {
-        const transaction = this.db.transaction([...BUSINESS_STORES, "syncMeta", "staging", "connectionConfig"], "readwrite");
+        const transaction = this.db.transaction("connectionConfig", "readwrite");
         const done = transactionDone(transaction);
-        const deletes = [];
-        if (oldWorkspaceId) {
-          for (const name of BUSINESS_STORES) deletes.push(deleteMatching(transaction.objectStore(name), value => value.workspaceId === oldWorkspaceId));
-          deletes.push(deleteMatching(transaction.objectStore("syncMeta"), value => value.workspaceId === oldWorkspaceId));
-          deletes.push(deleteMatching(transaction.objectStore("staging"), value => value.type === "remote-refresh" && value.workspaceId === oldWorkspaceId));
-        }
         const connectionStore = transaction.objectStore("connectionConfig");
         if (newConnection) connectionStore.put({ ...newConnection, localId: "active", schemaVersion: SCHEMA_VERSION });
         else connectionStore.delete("active");
-        await Promise.all(deletes);
         await done;
       } finally {
         this.switchInProgress = false;
@@ -286,15 +279,35 @@ class LocalDatabase {
   }
 
   initializationRecoveryId(databaseId) { return `initialization-recovery:${databaseId}`; }
+  async getStagingRecords() { return this.getAll("staging"); }
   async getInitializationRecoveries() {
-    return (await this.getAll("staging")).filter(value => value.type === "initialization-recovery" && value.targetDatabaseId);
+    return (await this.getStagingRecords()).filter(value => value.type === "initialization-recovery");
+  }
+  async getInitializationRecovery(localId) {
+    const value = await this.get("staging", localId);
+    return value?.type === "initialization-recovery" ? value : null;
+  }
+  async putInitializationRecoveryRecord(localId, databaseId, partial) {
+    if (!databaseId) throw new Error("初始化恢复点缺少目标 Database ID。");
+    const recordId = localId || this.initializationRecoveryId(databaseId);
+    const existing = await this.get("staging", recordId);
+    const now = new Date().toISOString();
+    await this.put("staging", {
+      ...(existing?.type === "initialization-recovery" ? existing : {}),
+      ...partial,
+      localId: recordId,
+      type: "initialization-recovery",
+      databaseId,
+      targetDatabaseId: databaseId,
+      createdAt: existing?.createdAt || partial.createdAt || now,
+      updatedAt: now
+    });
   }
   async putInitializationRecovery(databaseId, partial) {
-    if (!databaseId) throw new Error("初始化恢复点缺少目标 Database ID。");
-    await this.put("staging", { localId: this.initializationRecoveryId(databaseId), type: "initialization-recovery", targetDatabaseId: databaseId, ...partial, updatedAt: new Date().toISOString() });
+    return this.putInitializationRecoveryRecord(this.initializationRecoveryId(databaseId), databaseId, partial);
   }
-  async removeInitializationRecovery(databaseId) { await this.remove("staging", this.initializationRecoveryId(databaseId)); }
-  async abandonInitializationRecovery(databaseId) { await this.removeInitializationRecovery(databaseId); }
+  async removeInitializationRecoveryRecord(localId) { await this.remove("staging", localId); }
+  async removeInitializationRecovery(databaseId) { await this.removeInitializationRecoveryRecord(this.initializationRecoveryId(databaseId)); }
 
   async migrateLegacyConfiguration() {
     if (!indexedDB.databases) return { checked: false, reason: "当前浏览器不支持安全枚举旧 IndexedDB。" };
