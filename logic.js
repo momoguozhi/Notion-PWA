@@ -24,6 +24,54 @@ export function filterItemsByCategory(items, subCategories, { majorId = null, su
   return items.filter(item => allowed.has(item.subLocalId));
 }
 
+export const SYNC_STATUS = Object.freeze({
+  MISSING: "remote-missing",
+  PENDING: "pending",
+  RELATION_PENDING: "relation-pending",
+  SYNCED: "synced"
+});
+
+export function categoryIssue(item, workspace) {
+  const sub = workspace.subCategories.find(record => record.localId === item.subLocalId);
+  if (!sub) return { code: "missing-sub", label: "所用分类缺失", detail: "所用小分类不存在" };
+  if (sub.remoteMissing) return { code: "remote-missing-sub", label: "所用分类缺失", detail: `小分类“${sub.name || "未命名"}”同步数据缺失` };
+  const major = workspace.majorCategories.find(record => record.localId === sub.majorLocalId);
+  if (!major) return { code: "missing-major", label: "所用分类缺失", detail: "所属大分类不存在" };
+  if (major.remoteMissing) return { code: "remote-missing-major", label: "所用分类缺失", detail: `大分类“${major.name || "未命名"}”同步数据缺失` };
+  return null;
+}
+
+export function deriveSyncStatus(entity, record, workspace) {
+  if (record.remoteMissing) return { code: SYNC_STATUS.MISSING, label: "同步数据缺失" };
+  if (record.dirty || record.pending) return { code: SYNC_STATUS.PENDING, label: "待上传" };
+  if (entity === "items") {
+    const sub = workspace.subCategories.find(item => item.localId === record.subLocalId);
+    const major = sub && workspace.majorCategories.find(item => item.localId === sub.majorLocalId);
+    if (sub?.dirty || sub?.pending || major?.dirty || major?.pending) return { code: SYNC_STATUS.RELATION_PENDING, label: "关联数据待上传" };
+  }
+  return { code: SYNC_STATUS.SYNCED, label: "已同步" };
+}
+
+export function matchesSyncFilter(item, workspace, filter = "all") {
+  if (filter === "all") return true;
+  const status = deriveSyncStatus("items", item, workspace).code;
+  if (categoryIssue(item, workspace) && !item.remoteMissing && !(item.dirty || item.pending)) return false;
+  if (filter === SYNC_STATUS.SYNCED) return status === filter && !categoryIssue(item, workspace);
+  return status === filter;
+}
+
+export function categoryDeleteBlock(entity, localId, workspace) {
+  if (entity === "majorCategories") {
+    const records = workspace.subCategories.filter(record => record.majorLocalId === localId);
+    return records.length ? { blocked: true, count: records.length, records, reason: `仍包含 ${records.length} 个小分类` } : { blocked: false, count: 0, records: [] };
+  }
+  if (entity === "subCategories") {
+    const records = workspace.items.filter(record => record.subLocalId === localId);
+    return records.length ? { blocked: true, count: records.length, records, reason: `仍被 ${records.length} 条具体资料使用` } : { blocked: false, count: 0, records: [] };
+  }
+  return { blocked: false, count: 0, records: [] };
+}
+
 export function describeRecoveries(recoveries) {
   return recoveries.map(recovery => {
     const id = recovery.targetDatabaseId || recovery.databaseId || null;

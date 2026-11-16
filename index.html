@@ -14,7 +14,7 @@
 </head>
 <body>
   <header class="app-header">
-    <div class="brand"><span class="brand-mark">N</span><div><strong>记录台</strong><small>Notion 本地优先 PWA · v0.4.5</small></div></div>
+    <div class="brand"><span class="brand-mark">N</span><div><strong>记录台</strong><small>Notion 本地优先 PWA · v0.5.1</small></div></div>
     <nav class="entity-tabs" aria-label="资料类型">
       <button class="entity-tab active" data-entity="items">具体资料 <span id="item-count">0</span></button>
       <button class="entity-tab" data-entity="pairings">配对记录 <span id="pairing-count">0</span></button>
@@ -43,6 +43,7 @@
         <button id="desktop-manage-categories">分类管理</button>
       </div>
       <label class="search"><span>⌕</span><input id="search" type="search" placeholder="搜索本地资料…" autocomplete="off"></label>
+      <label id="sync-filter-wrap" class="sync-filter">同步状态<select id="sync-filter"><option value="all">全部</option><option value="synced">已同步</option><option value="pending">待上传</option><option value="relation-pending">关联数据待上传</option><option value="remote-missing">同步数据缺失</option></select></label>
       <button id="add-record" class="primary">＋ 新增</button>
       <div class="desktop-view-switch" role="group" aria-label="Windows 显示方式">
         <button data-desktop-view="table" class="active">表格</button><button data-desktop-view="cards">图片卡片</button>
@@ -105,11 +106,12 @@
     <form method="dialog">
       <header class="dialog-header"><div><small>远程读取结果</small><h2>确认更新本地数据</h2></div><button type="button" class="icon-button close-refresh">×</button></header>
       <div id="refresh-preview" class="dialog-body"></div>
-      <footer class="dialog-footer"><button type="button" class="close-refresh">保留现状</button><span class="footer-spacer"></span><button type="button" id="apply-refresh" class="primary">按以上选择更新本地</button></footer>
+      <div id="refresh-error" class="dialog-error" role="alert" hidden></div>
+      <footer class="dialog-footer"><button type="button" class="close-refresh">取消</button><span class="footer-spacer"></span><button type="button" id="apply-refresh" class="primary">按以上选择更新本地</button></footer>
     </form>
   </dialog>
 
-  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite" popover="manual"></div>
   <script type="module" src="./app.js"></script>
 </body>
 </html>

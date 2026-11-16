@@ -24,9 +24,16 @@ function errorMessage(status, code, fallback) {
 
 export function extractNotionId(input) {
   const text = String(input || "").trim();
+  let target = text;
+  try {
+    const url = new URL(text);
+    target = decodeURIComponent(url.pathname);
+  } catch {
+    target = text.split(/[?#]/, 1)[0];
+  }
   const standard = /(?:^|[^0-9a-f])([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?=$|[^0-9a-f])/ig;
   const compact = /(?:^|[^0-9a-f])([0-9a-f]{32})(?=$|[^0-9a-f])/ig;
-  const matches = [...text.matchAll(standard), ...text.matchAll(compact)].sort((a, b) => a.index - b.index);
+  const matches = [...target.matchAll(standard), ...target.matchAll(compact)].sort((a, b) => a.index - b.index);
   const raw = matches.at(-1)?.[1];
   if (!raw) throw new Error("无法从输入内容识别 Notion ID。");
   const id = raw.replace(/-/g, "").toLowerCase();

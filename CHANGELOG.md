@@ -1,5 +1,11 @@
 # 版本更新记录
 
+## v0.5.1 — 2026-11-16
+- 完成远端缺失记录的 Refresh 选择、持久冻结、仅本地删除、恢复与 Upload 阻断链路；配对记录保持独立，不新增缺失绑定。
+- 增加分类缺失补选／跳过、最终关系复核、业务字段差异、整条冲突选择及原子应用失败保护。
+- 增加具体资料同步状态与筛选、分类状态展示、弹窗顶层通知，以及带 View ID 的 Notion URL 正确解析。
+- 保持远端 Schema v5、既有 Data Source 与本地存储结构；未执行真实浏览器、IndexedDB 持久化或真实 Notion 验证。
+
 ## v0.4.5 — 2026-11-12
 - 创建流程改为要求并保存用户输入的 Database 名称；Notion Page 仅作为创建 parent，Database ID 作为连接、Workspace 与 recovery 身份，同名 Database 可独立初始化。
 - initialization-recovery 改为按目标 Database ID 独立列出，并保留名称、状态、短 ID、时间、阶段、Data Source ID 与结构化错误；“暂不处理”不写入或删除记录，多条 recovery 不阻止新建。

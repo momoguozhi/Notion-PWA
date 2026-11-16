@@ -2,9 +2,9 @@ import { APP_SCHEMA, DEFAULT_DISPLAY_PREFERENCES, ENTITY, ITEM_DISPLAY_FIELDS, c
 import { localDb } from "./storage.js";
 import { credentials } from "./credentials.js";
 import { notionApi, NotionApiError } from "./notion-api.js";
-import { syncCoordinator } from "./sync.js";
+import { missingDeleteBlock, syncCoordinator } from "./sync.js";
 import { qrSvg } from "./qr.js";
-import { buildCategoryOrder, buildLocalDiagnostics, describeRecoveries, filterItemsByCategory, moveIdInOrder } from "./logic.js";
+import { SYNC_STATUS, buildCategoryOrder, buildLocalDiagnostics, categoryDeleteBlock, categoryIssue, deriveSyncStatus, describeRecoveries, filterItemsByCategory, matchesSyncFilter, moveIdInOrder } from "./logic.js";
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
@@ -17,9 +17,11 @@ const state = {
   selectedMajorId: null,
   selectedSubId: null,
   query: "",
+  syncFilter: "all",
   editingId: null,
   photoDraft: [],
   refreshDraft: null,
+  refreshChoices: { conflicts: {}, missing: {}, categories: {} },
   pendingCredentialAction: null,
   connectionSessionId: crypto.randomUUID(),
   connectionBusy: false,
@@ -48,11 +50,12 @@ function loadPreferences() {
 
 function savePreferences() { localStorage.setItem("notion-pwa-v041-display", JSON.stringify(state.preferences)); }
 function escapeHtml(value) { return String(value ?? "").replace(/[&<>\"]/g, char => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '\"':"&quot;" }[char])); }
-function toast(message, delay = 2400) { const el = $("#toast"); el.textContent = message; el.classList.add("show"); clearTimeout(toast.timer); toast.timer = setTimeout(() => el.classList.remove("show"), delay); }
+function toast(message, delay = 2400) { const el = $("#toast"); el.textContent = message; el.classList.add("show"); if (el.showPopover && !el.matches(":popover-open")) el.showPopover(); clearTimeout(toast.timer); toast.timer = setTimeout(() => { el.classList.remove("show"); if (el.hidePopover && el.matches(":popover-open")) el.hidePopover(); }, delay); }
 function recordName(record) { return record?.name || "（未命名）"; }
 function entityList(entity = state.entity) { return state.workspace[entity] || []; }
 function byId(entity, id) { return state.workspace[entity].find(record => record.localId === id) || null; }
 function categoryLabel(item) { const sub = byId(ENTITY.SUB, item.subLocalId); const major = sub ? byId(ENTITY.MAJOR, sub.majorLocalId) : null; return [major?.name, sub?.name].filter(Boolean).join(" › "); }
+function statusBadge(entity, record) { const status = deriveSyncStatus(entity, record, state.workspace); const issue = entity === ENTITY.ITEM ? categoryIssue(record, state.workspace) : null; const hideNormal = issue && !record.remoteMissing && !(record.dirty || record.pending); return `${hideNormal?"":`<span class="sync-badge ${status.code}">${escapeHtml(status.label)}</span>`}${issue?` <span class="category-issue" title="${escapeHtml(issue.detail)}">${escapeHtml(issue.label)}</span>`:""}`; }
 function formatPrice(item) { return item.price == null || item.price === "" ? "" : `${Number(item.price).toLocaleString("zh-CN")} ${item.currency || ""}`.trim(); }
 function notionLink(item) { return item.notionPageUrl || ""; }
 
@@ -112,7 +115,7 @@ function ensureActiveDatabase() {
 function resetWorkspaceUi() {
   state.workspace = { majorCategories: [], subCategories: [], items: [], pairings: [], photos: [] };
   state.selectedMajorId = null; state.selectedSubId = null; state.query = ""; state.editingId = null;
-  state.photoDraft = []; state.refreshDraft = null; state.pendingCredentialAction = null;
+  state.photoDraft = []; state.refreshDraft = null; state.refreshChoices = { conflicts: {}, missing: {}, categories: {} }; state.pendingCredentialAction = null;
   state.managerMajorId = null; state.managerExpandedIds.clear(); state.categorySortDraft = null; state.categorySortOriginal = null; state.categoryDrag = null;
   $("#search").value = "";
   ["#record-dialog", "#category-dialog", "#refresh-dialog"].forEach(selector => { const dialog = $(selector); if (dialog.open) dialog.close(); });
@@ -159,7 +162,7 @@ function filteredRecords() {
   return records.filter(record => {
     if (state.entity === ENTITY.ITEM) {
       const text = [record.name, record.notionUniqueId, categoryLabel(record), record.source].join(" ").toLocaleLowerCase("zh-CN");
-      return text.includes(query);
+      return text.includes(query) && matchesSyncFilter(record, state.workspace, state.syncFilter);
     }
     const mother = byId(ENTITY.ITEM, record.motherLocalId), father = byId(ENTITY.ITEM, record.fatherLocalId);
     return [record.name, mother?.name, father?.name, record.pollinationDate].join(" ").toLocaleLowerCase("zh-CN").includes(query);
@@ -174,11 +177,14 @@ function render() {
   $("#view-title").textContent = APP_SCHEMA[state.entity].title;
   $("#category-browser").hidden = state.entity !== ENTITY.ITEM;
   $("#desktop-category-controls").hidden = state.entity !== ENTITY.ITEM;
+  $("#sync-filter-wrap").hidden = state.entity !== ENTITY.ITEM;
+  $("#sync-filter").value = state.syncFilter;
   ["add-record","add-major","add-sub","manage-categories","desktop-add-major","desktop-add-sub","desktop-manage-categories","refresh-remote"].forEach(id => { $("#"+id).disabled = !state.connection; });
   $("#upload-pending").disabled = !state.connection || state.uploadBusy;
-  $("#save-upload").disabled = state.uploadBusy || state.recordSaveBusy;
+  const editingRecord = state.editingId ? byId(state.entity, state.editingId) : null;
+  $("#save-upload").disabled = state.uploadBusy || state.recordSaveBusy || Boolean(editingRecord?.remoteMissing);
   const localSave = $('#record-form button[type="submit"]');
-  if (localSave) localSave.disabled = state.recordSaveBusy;
+  if (localSave) localSave.disabled = state.recordSaveBusy || Boolean(editingRecord?.remoteMissing);
   renderCategories(); renderPending(); renderViews();
 }
 
@@ -203,7 +209,7 @@ function renderPending() {
 function itemCard(item, compact = false) {
   const photo = itemPhotos(item)[0];
   const visible = state.preferences.fieldOrder.filter(key => state.preferences.fields.includes(key));
-  return `<button class="data-card" data-open-record="${item.localId}"><span class="data-card-image">${photo?`<img src="${escapeHtml(photoUrl(photo))}" alt="">`:'◇'}</span><span class="data-card-body">${visible.map((key,index) => index===0?`<strong>${escapeHtml(displayValue(item,key)||"—")}</strong>`:`<span>${escapeHtml(displayValue(item,key)||"—")}</span>`).join("")}${item.pending?'<span>● 待上传</span>':''}</span></button>`;
+  return `<button class="data-card" data-open-record="${item.localId}"><span class="data-card-image">${photo?`<img src="${escapeHtml(photoUrl(photo))}" alt="">`:'◇'}</span><span class="data-card-body">${visible.map((key,index) => index===0?`<strong>${escapeHtml(displayValue(item,key)||"—")}</strong>`:`<span>${escapeHtml(displayValue(item,key)||"—")}</span>`).join("")}<span>${statusBadge(ENTITY.ITEM,item)}</span></span></button>`;
 }
 
 function pairingCard(record) {
@@ -232,7 +238,7 @@ function renderViews() {
 }
 
 function renderItemTable(records) {
-  return `<table><thead><tr><th>名称</th><th>正式编号</th><th>分类</th><th>入手日期</th><th>来源</th><th>价格</th><th>数量</th><th>同步</th><th class="row-actions">操作</th></tr></thead><tbody>${records.map(item => `<tr data-id="${item.localId}"><td class="name-cell">${escapeHtml(recordName(item))}</td><td>${escapeHtml(item.notionUniqueId||"—")}</td><td>${escapeHtml(categoryLabel(item)||"—")}</td><td>${escapeHtml(item.acquisitionDate||"—")}</td><td>${escapeHtml(item.source||"—")}</td><td>${escapeHtml(formatPrice(item)||"—")}</td><td>${escapeHtml(item.quantity??1)}</td><td>${item.pending?'待上传':'已同步'}</td><td class="row-actions"><button data-open-record="${item.localId}">编辑</button></td></tr>`).join("")}</tbody></table>`;
+  return `<table><thead><tr><th>名称</th><th>正式编号</th><th>分类</th><th>入手日期</th><th>来源</th><th>价格</th><th>数量</th><th>同步</th><th class="row-actions">操作</th></tr></thead><tbody>${records.map(item => `<tr data-id="${item.localId}"><td class="name-cell">${escapeHtml(recordName(item))}</td><td>${escapeHtml(item.notionUniqueId||"—")}</td><td>${escapeHtml(categoryLabel(item)||"—")}</td><td>${escapeHtml(item.acquisitionDate||"—")}</td><td>${escapeHtml(item.source||"—")}</td><td>${escapeHtml(formatPrice(item)||"—")}</td><td>${escapeHtml(item.quantity??1)}</td><td>${statusBadge(ENTITY.ITEM,item)}</td><td class="row-actions"><button data-open-record="${item.localId}">${item.remoteMissing?'查看':'编辑'}</button></td></tr>`).join("")}</tbody></table>`;
 }
 
 function renderPairingTable(records) {
@@ -481,8 +487,8 @@ function renderDisplaySettings() {
 }
 
 function itemOptions(selected = "") { return state.workspace.items.map(item => `<option value="${item.localId}" ${item.localId===selected?'selected':''}>${escapeHtml(recordName(item))} ${item.notionUniqueId?`(${escapeHtml(item.notionUniqueId)})`:""}</option>`).join(""); }
-function majorOptions(selected = "") { return [...state.workspace.majorCategories].sort((a,b)=>a.sort-b.sort).map(major=>`<option value="${major.localId}" ${major.localId===selected?'selected':''}>${escapeHtml(recordName(major))}</option>`).join(""); }
-function subOptionsForMajor(majorId, selected = "") { return state.workspace.subCategories.filter(sub=>sub.majorLocalId===majorId).sort((a,b)=>a.sort-b.sort).map(sub=>`<option value="${sub.localId}" ${sub.localId===selected?'selected':''}>${escapeHtml(recordName(sub))}</option>`).join(""); }
+function majorOptions(selected = "") { return [...state.workspace.majorCategories].filter(major=>!major.remoteMissing).sort((a,b)=>a.sort-b.sort).map(major=>`<option value="${major.localId}" ${major.localId===selected?'selected':''}>${escapeHtml(recordName(major))}</option>`).join(""); }
+function subOptionsForMajor(majorId, selected = "") { return state.workspace.subCategories.filter(sub=>sub.majorLocalId===majorId&&!sub.remoteMissing).sort((a,b)=>a.sort-b.sort).map(sub=>`<option value="${sub.localId}" ${sub.localId===selected?'selected':''}>${escapeHtml(recordName(sub))}</option>`).join(""); }
 
 function openRecord(localId = null) {
   if (!ensureActiveDatabase()) return;
@@ -492,6 +498,10 @@ function openRecord(localId = null) {
   $("#record-title").textContent = recordName(record);
   $("#delete-local").hidden = !record;
   if (state.entity === ENTITY.ITEM) renderItemForm(record); else renderPairingForm(record);
+  const frozen = Boolean(record?.remoteMissing);
+  $$("#record-fields input, #record-fields select, #record-fields button").forEach(control => { control.disabled = frozen; });
+  $('#record-form button[type="submit"]').disabled = frozen;
+  $("#save-upload").disabled = frozen || state.uploadBusy || state.recordSaveBusy;
   $("#record-dialog").showModal();
 }
 
@@ -504,7 +514,8 @@ function renderItemForm(item) {
   const selectedSub = item?.subLocalId ? byId(ENTITY.SUB, item.subLocalId) : null;
   const selectedMajorId = selectedSub?.majorLocalId || state.selectedMajorId || "";
   const pairings = item ? reversePairings(item.localId) : [];
-  $("#record-fields").innerHTML = `<div class="record-meta">${item?.notionPageId?`<span>Page ID：${escapeHtml(item.notionPageId)}</span><span>正式编号：${escapeHtml(item.notionUniqueId||"等待 Notion 返回")}</span>`:'<span>本地 UUID：保存后生成</span>'}${pairings.length?`<span>相关配对：${pairings.length}</span>`:""}</div><div class="form-layout">
+  const issue = item ? categoryIssue(item, state.workspace) : null;
+  $("#record-fields").innerHTML = `<div class="record-meta">${item?statusBadge(ENTITY.ITEM,item):""}${issue?`<span>${escapeHtml(issue.detail)}</span>`:""}${item?.remoteMissing?'<span>当前记录只读；可查看或删除本地副本。</span>':""}${item?.notionPageId?`<span>Page ID：${escapeHtml(item.notionPageId)}</span><span>正式编号：${escapeHtml(item.notionUniqueId||"等待 Notion 返回")}</span>`:'<span>本地 UUID：保存后生成</span>'}${pairings.length?`<span>相关配对：${pairings.length}</span>`:""}</div><div class="form-layout">
     <label class="form-control full">名称<input name="name" value="${escapeHtml(item?.name||"")}"></label>
     <label class="form-control">大分类（筛选）<span class="inline-field"><select name="majorLocalId"><option value="">请选择</option>${majorOptions(selectedMajorId)}</select><button type="button" data-inline-category="major">＋</button></span></label>
     <label class="form-control">小分类（必选）<span class="inline-field"><select name="subLocalId" required><option value="">请选择</option>${subOptionsForMajor(selectedMajorId,item?.subLocalId)}</select><button type="button" data-inline-category="sub">＋</button></span></label>
@@ -546,6 +557,7 @@ async function performSaveRecordLocal() {
   const form = $("#record-form");
   if (!form.reportValidity()) return null;
   const existing = state.editingId ? byId(state.entity,state.editingId) : null;
+  if (existing?.remoteMissing) return toast("同步数据缺失记录为只读，不能保存或上传"), null;
   let record = existing ? {...existing} : createLocalRecord(state.entity);
   if (state.entity === ENTITY.ITEM) {
     const values = Object.fromEntries(new FormData(form).entries());
@@ -624,22 +636,45 @@ async function refreshRemote() {
   try {
     setBanner("warning","正在从 Notion 分页读取；不会上传本地数据…");
     state.refreshDraft = await syncCoordinator.fetchRemoteWorkspace(state.connection, context);
+    state.refreshChoices = { conflicts: Object.fromEntries(state.refreshDraft.summary.conflicts.map(item => [item.localId, "local"])), missing: {}, categories: {} };
+    $("#refresh-error").hidden = true;
     renderRefreshPreview(); $("#refresh-dialog").showModal(); setBanner("ok","远程读取完成，等待用户决定是否更新本地");
   } catch (error) { try { context.assertCurrent(); } catch { return; } setBanner("error",error.message); toast(error.message,5000); }
 }
 
 function renderRefreshPreview() {
   const {summary} = state.refreshDraft;
-  $("#refresh-preview").innerHTML = `<div class="refresh-summary"><div><strong>${summary.additions}</strong>远程新增</div><div><strong>${summary.remoteChanges}</strong>远程变化</div><div><strong>${summary.conflicts.length}</strong>双边冲突</div><div><strong>${summary.remoteDeletes.length}</strong>远程缺失</div></div><p>刷新只更新本地，不会上传。远程缺失仅作提示，应用 Refresh 后仍会保留本地记录、照片、Relation 和待上传状态。</p>${summary.conflicts.length?`<div class="conflict-list">${summary.conflicts.map(conflict=>`<label class="conflict-row"><span>${escapeHtml(conflict.name)}</span><select data-conflict-choice="${conflict.localId}"><option value="local">保留本地</option><option value="remote">采用远程</option></select></label>`).join("")}</div>`:'<p>没有双边冲突。</p>'}${summary.remoteDeletes.length?`<p>远程缺失（不会删除本地）：${summary.remoteDeletes.map(item=>escapeHtml(item.name)).join("、")}</p>`:""}`;
+  const diffTable = diffs => diffs?.length ? `<table class="diff-table"><thead><tr><th>字段</th><th>本地</th><th>Notion</th></tr></thead><tbody>${diffs.map(diff=>`<tr><th>${escapeHtml(diff.label)}</th><td>${escapeHtml(diff.local)}</td><td>${escapeHtml(diff.remote)}</td></tr>`).join("")}</tbody></table>` : "";
+  const recordList = (title, records) => records?.length ? `<section class="refresh-section"><h3>${title}</h3>${records.map(item=>`<article class="refresh-record"><strong>${escapeHtml(item.entityLabel)} · ${escapeHtml(item.name)}</strong>${diffTable(item.diffs)}</article>`).join("")}</section>` : "";
+  const missingRows = summary.remoteDeletes.map(entry => {
+    if (!entry.managed) return `<article class="refresh-record"><strong>${escapeHtml(entry.entityLabel)} · ${escapeHtml(entry.name)}</strong><p>配对记录远程缺失仅报告，本版不绑定冻结或删除。</p></article>`;
+    if (entry.known) return `<article class="refresh-record"><strong>${escapeHtml(entry.entityLabel)} · ${escapeHtml(entry.name)}</strong><p>已标记为“同步数据缺失”，不重复要求选择。</p></article>`;
+    const selected = state.refreshChoices.missing[entry.localId];
+    const block = missingDeleteBlock(entry, state.workspace, state.refreshChoices);
+    return `<article class="refresh-record"><strong>${escapeHtml(entry.entityLabel)} · ${escapeHtml(entry.name)}</strong><div class="choice-buttons"><button type="button" data-missing-choice="${entry.localId}" data-choice="delete" class="${selected==='delete'?'selected':''}" ${block.blocked?'disabled':''}>立即删除本地</button><button type="button" data-missing-choice="${entry.localId}" data-choice="defer" class="${selected==='defer'?'selected':''}">稍后处理</button></div>${block.blocked?`<p class="blocking-reason">不能删除：${escapeHtml(block.reason)}（${block.records.slice(0,5).map(record=>escapeHtml(recordName(record))).join("、")}）</p>`:""}</article>`;
+  }).join("");
+  const categoryRows = summary.categoryIssues.map(issue => {
+    const value = state.refreshChoices.categories[issue.localId] || {};
+    const categories = refreshCategoryOptions(value.majorLocalId);
+    return `<article class="refresh-record"><strong>具体资料 · ${escapeHtml(issue.name)}</strong><p>${escapeHtml(issue.reason)}</p><div class="category-remap"><select data-remap-major="${issue.localId}"><option value="">选择大分类</option>${categories.majors.map(record=>`<option value="${record.localId}" ${record.localId===value.majorLocalId?'selected':''}>${escapeHtml(recordName(record))}</option>`).join("")}</select><select data-remap-sub="${issue.localId}"><option value="">选择小分类</option>${categories.subs.map(record=>`<option value="${record.localId}" ${record.localId===value.subLocalId?'selected':''}>${escapeHtml(recordName(record))}</option>`).join("")}</select></div><div class="choice-buttons"><button type="button" data-category-choice="${issue.localId}" data-choice="remap" class="${value.action==='remap'?'selected':''}">改为所选分类</button><button type="button" data-category-choice="${issue.localId}" data-choice="skip" class="${value.action==='skip'?'selected':''}">跳过不下载</button></div></article>`;
+  }).join("");
+  $("#refresh-preview").innerHTML = `<div class="refresh-summary"><div><strong>${summary.additions}</strong>远程新增</div><div><strong>${summary.remoteChanges}</strong>远程变化</div><div><strong>${summary.conflicts.length}</strong>双边冲突</div><div><strong>${summary.remoteDeletes.length}</strong>远程缺失</div></div><p>所有选择只在点击底部应用后统一校验并写入本地；取消不会应用业务变化。</p>${recordList("远程新增",summary.additionRecords)}${recordList("远程变化",summary.remoteChangeRecords)}${summary.conflicts.length?`<section class="refresh-section"><h3>双边冲突</h3>${summary.conflicts.map(conflict=>`<article class="refresh-record"><strong>${escapeHtml(conflict.entityLabel)} · ${escapeHtml(conflict.name)}</strong>${diffTable(conflict.diffs)}<div class="choice-buttons"><button type="button" data-conflict-choice="${conflict.localId}" data-choice="local" class="${state.refreshChoices.conflicts[conflict.localId]==='local'?'selected':''}">保留本地</button><button type="button" data-conflict-choice="${conflict.localId}" data-choice="remote" class="${state.refreshChoices.conflicts[conflict.localId]==='remote'?'selected':''}">采用远程</button></div></article>`).join("")}</section>`:""}${missingRows?`<section class="refresh-section"><h3>远程缺失</h3>${missingRows}</section>`:""}${categoryRows?`<section class="refresh-section"><h3>分类异常</h3>${categoryRows}</section>`:""}${summary.anomalies?.length?`<section class="refresh-section"><h3>不阻断的 Relation 异常</h3>${summary.anomalies.map(item=>`<p>${escapeHtml(item.name)}：${escapeHtml(item.reason)}</p>`).join("")}</section>`:""}`;
+}
+
+function refreshCategoryOptions(majorId = "") {
+  const draft = state.refreshDraft?.staging;
+  const majors = [...state.workspace.majorCategories, ...(draft?.majorCategories || [])].filter((record,index,all)=>!record.remoteMissing&&all.findIndex(item=>item.localId===record.localId)===index&&state.refreshChoices.missing[record.localId]!=="delete");
+  const majorByPage = new Map((draft?.majorCategories || []).map(record=>[record.notionPageId,record.localId]));
+  const subs = [...state.workspace.subCategories, ...(draft?.subCategories || []).map(record=>({...record,majorLocalId:record.majorLocalId||majorByPage.get(record.majorPageId)||null}))].filter((record,index,all)=>!record.remoteMissing&&record.majorLocalId===majorId&&all.findIndex(item=>item.localId===record.localId)===index&&state.refreshChoices.missing[record.localId]!=="delete");
+  return { majors: majors.sort((a,b)=>(a.sort||0)-(b.sort||0)), subs: subs.sort((a,b)=>(a.sort||0)-(b.sort||0)) };
 }
 
 async function applyRefresh() {
   let context;
   try {
     context = captureSession();
-    const choices = Object.fromEntries($$("[data-conflict-choice]").map(select=>[select.dataset.conflictChoice,select.value]));
-    await syncCoordinator.applyRemote(state.connection,state.refreshDraft,choices,context); state.refreshDraft=null; $("#refresh-dialog").close(); await reloadWorkspace(); setBanner("ok","已按用户选择更新本地；远程缺失记录已保留，未上传任何数据");
-  } catch (error) { if (context) { try { context.assertCurrent(); } catch { return; } } setBanner("error", error.message); toast(error.message, 5000); }
+    await syncCoordinator.applyRemote(state.connection,state.refreshDraft,state.refreshChoices,context); state.refreshDraft=null; $("#refresh-dialog").close(); await reloadWorkspace(); setBanner("ok","已按用户选择原子更新本地；未上传任何数据");
+  } catch (error) { if (context) { try { context.assertCurrent(); } catch { return; } } const box=$("#refresh-error"); box.textContent=error.message; box.hidden=false; setBanner("error", error.message); toast(error.message, 5000); }
 }
 
 async function uploadPending() {
@@ -652,8 +687,9 @@ async function uploadPending() {
     setBanner("warning","正在上传本地待上传变化；不会先执行刷新…");
     const results = await syncCoordinator.runUploadBatch(state.connection,context,() => syncCoordinator.uploadPending(state.connection,context,message=>setBanner("warning",message)));
     context.assertCurrent(); await reloadWorkspace(); context.assertCurrent();
-    if (results.failed.length) { const first=results.failed[0]; setBanner("error",`${results.uploaded} 条成功，${results.failed.length} 条失败：${first.error.message}`); if(first.error.code==="local_remote_conflict"&&confirm(`${first.error.message}\n\n确定以本地版本覆盖 Notion 吗？`)){await syncCoordinator.runUploadBatch(state.connection,context,() => syncCoordinator.uploadRecord(first.entity,first.localId,state.connection,{force:true,context}));context.assertCurrent();await reloadWorkspace();setBanner("ok","已按用户确认覆盖冲突记录；其余 pending 保留");} }
-    else setBanner("ok",`已上传 ${results.uploaded} 条本地变化`);
+    if (results.failed.length) { const first=results.failed[0]; setBanner("error",`${results.uploaded} 条成功，${results.failed.length} 条失败，${results.skipped.length} 条未执行：${first.error.message}`); if(first.error.code==="local_remote_conflict"&&confirm(`${first.error.message}\n\n确定以本地版本覆盖 Notion 吗？`)){await syncCoordinator.runUploadBatch(state.connection,context,() => syncCoordinator.uploadRecord(first.entity,first.localId,state.connection,{force:true,context}));context.assertCurrent();await reloadWorkspace();setBanner("ok","已按用户确认覆盖冲突记录；其余 pending 保留");} }
+    else if(results.skipped.length)setBanner("warning",`${results.uploaded} 条成功，0 条失败，${results.skipped.length} 条未执行：${results.skipped[0].error.message}`);
+    else setBanner("ok",`已上传 ${results.uploaded} 条本地变化；0 条失败，0 条未执行`);
   } catch (error) { if (context) { try { context.assertCurrent(); } catch { return; } } setBanner("error", error.message); toast(error.message, 5000); }
   finally { state.uploadBusy = false; render(); }
 }
@@ -661,6 +697,7 @@ async function uploadPending() {
 async function addCategory(type, parentMajorId = null) {
   if (!ensureActiveDatabase()) return null;
   const majorId = parentMajorId || state.selectedMajorId;
+  if(type===ENTITY.SUB&&byId(ENTITY.MAJOR,majorId)?.remoteMissing)return toast("同步数据缺失大分类已冻结，不能新增小分类");
   if (type===ENTITY.SUB && !majorId) {
     openCategoryManager();
     toast("请在分类管理中展开目标大分类后新增小分类");
@@ -699,7 +736,7 @@ function renderCategoryManager(){
   if(!state.categorySortDraft)initializeCategorySortDraft();
   const majorById=new Map(state.workspace.majorCategories.map(record=>[record.localId,record]));
   const subById=new Map(state.workspace.subCategories.map(record=>[record.localId,record]));
-  $("#major-manager").innerHTML=`<div class="category-tree">${state.categorySortDraft.majors.map(majorId=>{const major=majorById.get(majorId);if(!major)return"";const expanded=state.managerExpandedIds.has(majorId);const children=(state.categorySortDraft.subs[majorId]||[]).map(subId=>subById.get(subId)).filter(Boolean);return `<div class="category-tree-node" data-sort-row data-sort-entity="${ENTITY.MAJOR}" data-sort-id="${majorId}"><div class="manager-row major-manager-row ${majorId===state.managerMajorId?'current':''}"><button type="button" class="tree-toggle" data-category-toggle="${majorId}" aria-expanded="${expanded}">${expanded?'▾':'▸'}</button><button type="button" class="drag-handle" data-drag-handle aria-label="拖动大分类">⠿</button><span>${escapeHtml(recordName(major))}</span><button type="button" data-category-edit="${ENTITY.MAJOR}:${majorId}">编辑</button></div>${expanded?`<div class="category-children">${children.map(sub=>`<div class="manager-row sub-tree-row" data-sort-row data-sort-entity="${ENTITY.SUB}" data-sort-id="${sub.localId}" data-sort-parent="${majorId}"><span class="tree-indent"></span><button type="button" class="drag-handle" data-drag-handle aria-label="拖动小分类">⠿</button><span>${escapeHtml(recordName(sub))}</span><button type="button" data-category-edit="${ENTITY.SUB}:${sub.localId}">编辑</button></div>`).join("")}<button type="button" class="add-child" data-category-add="${ENTITY.SUB}" data-parent-major="${majorId}">＋ 新增小分类</button></div>`:""}</div>`;}).join("")}</div><div class="manager-actions"><button type="button" data-category-add="${ENTITY.MAJOR}">＋ 新增大分类</button><button type="button" id="reset-category-sort">取消排序修改</button><button type="button" id="save-category-sort" class="primary">保存排序</button></div>`;
+  $("#major-manager").innerHTML=`<div class="category-tree">${state.categorySortDraft.majors.map(majorId=>{const major=majorById.get(majorId);if(!major)return"";const expanded=state.managerExpandedIds.has(majorId);const children=(state.categorySortDraft.subs[majorId]||[]).map(subId=>subById.get(subId)).filter(Boolean);return `<div class="category-tree-node" data-sort-row data-sort-entity="${ENTITY.MAJOR}" data-sort-id="${majorId}"><div class="manager-row major-manager-row ${majorId===state.managerMajorId?'current':''}"><button type="button" class="tree-toggle" data-category-toggle="${majorId}" aria-expanded="${expanded}">${expanded?'▾':'▸'}</button><button type="button" class="drag-handle" data-drag-handle aria-label="拖动大分类" ${major.remoteMissing?'disabled':''}>⠿</button><span>${escapeHtml(recordName(major))} ${statusBadge(ENTITY.MAJOR,major)}</span><button type="button" data-category-edit="${ENTITY.MAJOR}:${majorId}">${major.remoteMissing?'查看':'编辑'}</button></div>${expanded?`<div class="category-children">${children.map(sub=>`<div class="manager-row sub-tree-row" data-sort-row data-sort-entity="${ENTITY.SUB}" data-sort-id="${sub.localId}" data-sort-parent="${majorId}"><span class="tree-indent"></span><button type="button" class="drag-handle" data-drag-handle aria-label="拖动小分类" ${sub.remoteMissing?'disabled':''}>⠿</button><span>${escapeHtml(recordName(sub))} ${statusBadge(ENTITY.SUB,sub)}</span><button type="button" data-category-edit="${ENTITY.SUB}:${sub.localId}">${sub.remoteMissing?'查看':'编辑'}</button></div>`).join("")}<button type="button" class="add-child" data-category-add="${ENTITY.SUB}" data-parent-major="${majorId}">＋ 新增小分类</button></div>`:""}</div>`;}).join("")}</div><div class="manager-actions"><button type="button" data-category-add="${ENTITY.MAJOR}">＋ 新增大分类</button><button type="button" id="reset-category-sort">取消排序修改</button><button type="button" id="save-category-sort" class="primary">保存排序</button></div>`;
   if(!$("#category-editor").hasChildNodes())$("#category-editor").innerHTML='<p class="muted">选择大分类或小分类的“编辑”以修改名称；小分类所属大分类也在此修改。</p>';
 }
 
@@ -707,12 +744,13 @@ function openCategoryEditor(target){
   const[entity,id]=target.split(":"),record=byId(entity,id);if(!record)return;
   state.managerMajorId=entity===ENTITY.MAJOR?id:record.majorLocalId;
   if(state.managerMajorId)state.managerExpandedIds.add(state.managerMajorId);
-  $("#category-editor").innerHTML=`<div class="category-editor-panel"><h3>编辑${entity===ENTITY.MAJOR?'大分类':'小分类'}</h3><label>名称<input id="category-edit-name" value="${escapeHtml(record.name)}"></label>${entity===ENTITY.SUB?`<label>所属大分类<select id="category-edit-major">${majorOptions(record.majorLocalId)}</select></label>`:""}<div class="form-actions"><button type="button" data-category-editor-cancel>取消</button><button type="button" class="danger" data-category-delete="${target}">删除</button><button type="button" class="primary" data-category-editor-save="${target}">保存修改</button></div></div>`;
+  $("#category-editor").innerHTML=`<div class="category-editor-panel"><h3>${record.remoteMissing?'查看':'编辑'}${entity===ENTITY.MAJOR?'大分类':'小分类'} ${statusBadge(entity,record)}</h3>${record.remoteMissing?'<p>同步数据缺失，分类已冻结；仅可定位、查看，且在没有引用时删除本地副本。</p>':''}<label>名称<input id="category-edit-name" value="${escapeHtml(record.name)}" ${record.remoteMissing?'disabled':''}></label>${entity===ENTITY.SUB?`<label>所属大分类<select id="category-edit-major" ${record.remoteMissing?'disabled':''}>${majorOptions(record.majorLocalId)}</select></label>`:""}<div class="form-actions"><button type="button" data-category-editor-cancel>取消</button><button type="button" class="danger" data-category-delete="${target}">删除</button>${record.remoteMissing?'':`<button type="button" class="primary" data-category-editor-save="${target}">保存修改</button>`}</div></div>`;
   renderCategoryManager();
 }
 
 async function saveCategoryEdit(target){
   const[entity,id]=target.split(":"),record=byId(entity,id);if(!record)return;
+  if(record.remoteMissing)return toast("同步数据缺失分类已冻结，不能修改");
   const name=$("#category-edit-name").value.trim();if(!name)return toast("分类名称不能为空");
   if(entityList(entity).some(item=>item.localId!==id&&item.name.trim().toLocaleLowerCase("zh-CN")===name.toLocaleLowerCase("zh-CN")))return toast("同类分类名称不能重复");
   const next={...record,name,dirty:true,pending:true,updatedAt:new Date().toISOString()},oldMajorId=record.majorLocalId;
@@ -726,10 +764,9 @@ async function saveCategoryEdit(target){
 
 async function deleteCategory(target){
   const[entity,id]=target.split(":"),record=byId(entity,id);if(!record)return;
-  if(record.notionPageId)return toast("已同步分类不能仅在本地删除；远程归档不在本版范围");
-  if(entity===ENTITY.MAJOR&&state.workspace.subCategories.some(sub=>sub.majorLocalId===id))return toast("该大分类仍包含小分类，不能删除");
-  if(entity===ENTITY.SUB&&state.workspace.items.some(item=>item.subLocalId===id))return toast("该小分类仍被具体资料使用，不能删除");
-  if(!confirm(`删除本地未上传分类“${recordName(record)}”？`))return;
+  if(record.notionPageId&&!record.remoteMissing)return toast("已同步分类不能仅在本地删除；远程归档不在本版范围");
+  const block=categoryDeleteBlock(entity,id,state.workspace);if(block.blocked)return toast(`不能删除：${block.reason}（${block.records.slice(0,5).map(recordName).join("、")}）`,5000);
+  if(!confirm(`删除本地${record.remoteMissing?'同步数据缺失':'未上传'}分类“${recordName(record)}”？`))return;
   const session=captureSession();session.assertCurrent();await localDb.remove(entity,id,session.workspaceId,session.sessionId);await reloadWorkspace();session.assertCurrent();state.managerExpandedIds.delete(id);
   for(const model of [state.categorySortDraft,state.categorySortOriginal]){if(entity===ENTITY.MAJOR){model.majors=model.majors.filter(localId=>localId!==id);delete model.subs[id];}else model.subs[record.majorLocalId]=(model.subs[record.majorLocalId]||[]).filter(localId=>localId!==id);}
   $("#category-editor").innerHTML="";renderCategoryManager();
@@ -745,6 +782,7 @@ async function saveCategorySort(){
   if(JSON.stringify(state.categorySortDraft.majors)!==JSON.stringify(state.categorySortOriginal.majors))state.categorySortDraft.majors.forEach((id,index)=>{const record=byId(ENTITY.MAJOR,id);if(record)majors.push({...record,sort:(index+1)*10,dirty:true,pending:true,updatedAt:now});});
   Object.entries(state.categorySortDraft.subs).forEach(([majorId,ids])=>{if(JSON.stringify(ids)!==JSON.stringify(state.categorySortOriginal.subs[majorId]||[]))ids.forEach((id,index)=>{const record=byId(ENTITY.SUB,id);if(record&&record.majorLocalId===majorId)subs.push({...record,sort:(index+1)*10,dirty:true,pending:true,updatedAt:now});});});
   if(!majors.length&&!subs.length)return toast("分类顺序没有变化");
+  if([...majors,...subs].some(record=>record.remoteMissing))return toast("同步数据缺失分类已冻结，不能修改排序");
   const session=captureSession();session.assertCurrent();await localDb.saveCategorySort(majors,subs,session.workspaceId,session.sessionId);await reloadWorkspace();session.assertCurrent();initializeCategorySortDraft();renderCategoryManager();toast("分类排序已保存到本机；未自动上传");
 }
 
@@ -774,6 +812,9 @@ async function createInlineCategory(type) {
 
 
 document.addEventListener("click",async event=>{
+  const conflictChoice=event.target.closest("[data-conflict-choice]");if(conflictChoice){state.refreshChoices.conflicts[conflictChoice.dataset.conflictChoice]=conflictChoice.dataset.choice;renderRefreshPreview();return;}
+  const missingChoice=event.target.closest("[data-missing-choice]");if(missingChoice){state.refreshChoices.missing[missingChoice.dataset.missingChoice]=missingChoice.dataset.choice;renderRefreshPreview();return;}
+  const categoryChoice=event.target.closest("[data-category-choice]");if(categoryChoice){const id=categoryChoice.dataset.categoryChoice;state.refreshChoices.categories[id] ||= {};if(categoryChoice.dataset.choice==="remap"&&(!state.refreshChoices.categories[id].majorLocalId||!state.refreshChoices.categories[id].subLocalId))return toast("请选择有效的大分类和小分类");state.refreshChoices.categories[id].action=categoryChoice.dataset.choice;renderRefreshPreview();return;}
   const entity=event.target.closest("[data-entity]");if(entity){state.entity=entity.dataset.entity;state.query="";$("#search").value="";render();return;}
   const major=event.target.closest("[data-major]");if(major){state.selectedMajorId=major.dataset.major||null;state.selectedSubId=null;render();return;}
   const sub=event.target.closest("[data-sub]");if(sub){state.selectedSubId=sub.dataset.sub||null;render();return;}
@@ -803,6 +844,9 @@ document.addEventListener("click",async event=>{
 });
 
 document.addEventListener("change",async event=>{
+  if(event.target.id==="sync-filter"){state.syncFilter=event.target.value;renderViews();return;}
+  if(event.target.matches("[data-remap-major]")){const id=event.target.dataset.remapMajor;state.refreshChoices.categories[id]={action:null,majorLocalId:event.target.value,subLocalId:""};renderRefreshPreview();return;}
+  if(event.target.matches("[data-remap-sub]")){const id=event.target.dataset.remapSub;state.refreshChoices.categories[id] ||= {};state.refreshChoices.categories[id].subLocalId=event.target.value;state.refreshChoices.categories[id].action=null;renderRefreshPreview();return;}
   if(event.target.id==="desktop-major"){state.selectedMajorId=event.target.value||null;state.selectedSubId=null;render();return;}
   if(event.target.id==="desktop-sub"){state.selectedSubId=event.target.value||null;render();return;}
   if(event.target.id==="record-photo-input"){
@@ -822,6 +866,7 @@ document.addEventListener("change",async event=>{
 document.addEventListener("pointerdown",event=>{
   const handle=event.target.closest("[data-drag-handle]");if(!handle)return;
   const row=handle.closest("[data-sort-row]");if(!row)return;
+  if(byId(row.dataset.sortEntity,row.dataset.sortId)?.remoteMissing)return toast("同步数据缺失分类已冻结，不能排序");
   event.preventDefault();
   state.categoryDrag={row,entity:row.dataset.sortEntity,id:row.dataset.sortId,parentId:row.dataset.sortParent||null,pointerId:event.pointerId};
   row.classList.add("dragging");
@@ -861,8 +906,8 @@ $("#record-form").addEventListener("keydown",event=>{if(state.entity===ENTITY.IT
 $("#save-upload").addEventListener("click",saveAndUpload);
 $("#delete-local").addEventListener("click",async()=>{
   const session=captureSession(),record=byId(state.entity,state.editingId);
-  if(record?.notionPageId)return toast("已同步记录不能仅在本地删除；远程归档将在后续明确版本处理");
-  if(record&&confirm("仅删除这条尚未上传的本地记录？")){
+  if(record?.notionPageId&&!record.remoteMissing)return toast("已同步记录不能仅在本地删除；远程归档将在后续明确版本处理");
+  if(record&&confirm(record.remoteMissing?"仅删除这条同步数据缺失的本地记录？":"仅删除这条尚未上传的本地记录？")){
     session.assertCurrent();
     if(state.entity===ENTITY.ITEM)await localDb.deleteItemWithPhotos(record.localId,session.workspaceId,session.sessionId);
     else await localDb.remove(state.entity,record.localId,session.workspaceId,session.sessionId);
